@@ -231,7 +231,26 @@ Java/glibc PRNG 恢复、RSA 攻击封装、密钥解析与签名原语。
 - 次数 > 1 的 Coppersmith 在纯 Python 下只在很小的格维度上可行：所以
   `stereotyped_message` 与 `hastad_padded` 会先走精确整数开方路径（消息未发生模 n 约减时，
   这也是 CTF 里最常见的形态），只有真发生回绕时才落到格上，而那里可能耗尽时间预算。
-- 玩具曲线以外的 ECC、多元 Coppersmith、Boneh-Durfee、完整 Bleichenbacher：
+- **双变量 Coppersmith**（`coppersmith_bivariate`、`known_high_bits_two_primes`）实测是
+  *每个未知量几个 bit*，`n` 到大约 384 位：12 列的 LLL 上限先于行列式允许的 `XY < N^0.4`
+  卡住；512 位的 `n` 会被基大小预检直接拒绝，而不是傻跑约 74 秒。只找整数根。
+  `known_high_bits_two_primes` 要传**未移位**的高位，函数自己乘 `2^shift` —— 传移位过的
+  值会失败且不说明原因。
+- **线性化格**（`linearize`、`recover_from_products`）处理*已确定*的线性同余系统，上限约
+  12 个格坐标（4–5 个未知量），几秒内出结果，超过就拒绝。若方程组里变量只以乘积形式出现
+  （单独 `x*y == c`，或 `x+y == s` 与 `x*y == c` 同给），它**解不了** —— 那类形状属于
+  `coppersmith_bivariate`。`separate_variables` 只做精确算术、没有模数参数：把已证明的
+  单项值还原成变量本身（`x*y^2` 与 `x^2*y` 的 gcd 是 `x*y`）。
+- **多个模数共用私钥 d**（`common_d_attack`、`common_d_lattice`）在 512 位模数下实测：
+  m=3 到约 2^128 位、m=4 到约 2^150；**m=2 相比 `rsa_ops` 里原有的连分数段毫无增益**，
+  m=5 配 2^170 位失败。没有声称 `N^(m/(m+1))` 界——实测边界贴着格的 Gaussian heuristic。
+- **ADFGX / ADFGVX**：已知方阵时，读序在 k=6（`quick`）、k=7（`normal`）、k=8（`deep`，
+  约 15 秒）内穷举；k=9 在 `deep` 下偶尔能由模拟退火找到，k=11/12 未能恢复。方阵未知时，
+  只有方阵关键字在候选里**且**词级证据过了一道实测阈值才给答案，否则 `ok=False`，把最好的
+  往返结果作为 hypothesis 给出——单条密文在数学上定不唯一方阵。
+- `scan_structured_gcd` 把普通的共享素因子与 `N±1` 结构线索分开报（只有前者能分解模数），
+  低于 32 bit 的 gcd 只计数不当结论（视为噪声），并排除完全相同的模数。
+- 玩具曲线以外的 ECC、Boneh-Durfee、完整 Bleichenbacher：
   要么是写了文档的骨架，要么没有 —— 工具会报告假设与缺口，而不是假装能做。
 - 离散对数只有 BSGS / Pohlig-Hellman；群阶含大素因子时会如实报告不可行。
 - 纯 Python 的分数 LLL 在维度 ~8 以内比较舒服；次数为 1 的 Coppersmith 默认取
@@ -246,6 +265,7 @@ Java/glibc PRNG 恢复、RSA 攻击封装、密钥解析与签名原语。
   有多个字节串都符合，所以它不能声称找到了原来那一个。
 - Playfair / Hill / 列移位 / Bacon 天生有损（补 X、I/J 与 U/V 合并），
   所以那里的"往返"指的是 `decrypt(encrypt(x)) == prepared(x)`。
-- 暂时没有 Web 界面，也还没有 CI。
+- 暂时没有 Web 界面。CI 会在 Linux 上跑 3.10 与 3.12 两套测试，并在推 `v*` tag 时通过
+  trusted publishing 自动发布到 PyPI，发布环节不需要保存任何 token。
 
 License: MIT — coolmoon & guaidao2。

@@ -165,9 +165,9 @@ cx.java_random_predict(outputs, 4)                 # java.util.Random state reco
 | Polynomials | `utils/polytools.py` | poly divmod/gcd/derivative/roots-mod-p/from-roots/compose/powmod, irreducibility (Rabin), resultant, GF(2) polynomial arithmetic (bit-encoded) |
 | GF(p) linear algebra | `utils/gf.py` | RREF, solve, nullspace, inverse, matrix product, LCG parameter solving, linear-map recovery (Hill / LFSR-style) |
 | GF(2) + LFSR + CRC | `utils/gf2.py` | GF(2) RREF/rank/solve/nullspace/inverse, `LFSR`, Berlekamp-Massey tap recovery, CRC compute/catalog/parameter recovery/**forgery**/**preimage with an unknown field**, bit-ordering helpers |
-| Lattice | `utils/lattice.py` | pure-Python LLL, univariate Coppersmith, known-high-bits factoring, low-density subset sum (LLL) and meet-in-the-middle |
+| Lattice | `utils/lattice.py`, `utils/linearize.py`, `utils/common_d.py`, `utils/bivariate.py` | pure-Python LLL, univariate Coppersmith, known-high-bits factoring, low-density subset sum (LLL) and meet-in-the-middle, **linearization lattice** for modular systems with small unknowns, **shared-private-exponent SDAP lattice**, **bivariate polynomials + bivariate Coppersmith** |
 | Encodings | `utils/encoding.py` | hex/base64/base32/base58/base85/binary, decode-chain search, single-byte and repeating-key XOR, Caesar/affine/Vigenère/Morse/fence with scoring |
-| Classic ciphers | `utils/classic_extra.py` | Atbash, ROT47/ROT-N, Bacon, Playfair, Hill, columnar transposition, rail fence, autokey, substitution, base62/base91, URL/HTML decoding, cipher fingerprinting |
+| Classic ciphers | `utils/classic_extra.py`, `utils/adfgvx.py` | Atbash, ROT47/ROT-N, Bacon, Playfair, Hill, columnar transposition, rail fence, autokey, substitution, base62/base91, URL/HTML decoding, cipher fingerprinting, **ADFGX/ADFGVX** (squares, encrypt/decrypt, detection, cracker) |
 | Block ciphers | `utils/aes.py`, `utils/pad.py`, `utils/symtools.py` | pure-Python AES-128/192/256 in ECB/CBC, PKCS#7, XOR, CBC byte flipping, ECB detection from ciphertext alone, block-size inference |
 | Stream ciphers | `utils/stream.py` | RC4, ChaCha20 (RFC 8439), AES-CTR, keystream reuse / crib dragging |
 | Hashes | `utils/hashes.py` | pure-Python SHA-1/SHA-256 and **length extension** (`length_extension`, resumable `HashState`) |
@@ -176,7 +176,7 @@ cx.java_random_predict(outputs, 4)                 # java.util.Random state reco
 | Keys | `utils/keys.py` | PEM/DER RSA public+private parsing, OpenSSH public/private keys, DER encoder, SHA256 fingerprints |
 | Signatures | `utils/signatures.py` | ECDSA/DSA nonce-reuse recovery, toy-curve sign/verify, e=3 signature forgery, PKCS#1 v1.5 padding |
 | Oracle attacks | `oracle.py` | block-size/mode detection, unknown-prefix alignment, ECB byte-at-a-time, CBC padding oracle, local oracles for practice |
-| Analysis | `core/`, `hypothesis.py`, `lab.py` | blackboard context, two registries, 27 attack hypotheses with gap reporting, workbench scaffold generator, three-state verification; analyzer coverage now includes **CRC** (catalog lookup, preimage, forgery) and **LFSR** (tap recovery + keystream), each with a solve template |
+| Analysis | `core/`, `hypothesis.py`, `lab.py` | blackboard context, two registries, 28 attack hypotheses with gap reporting, workbench scaffold generator, three-state verification; analyzer coverage now includes **CRC** (catalog lookup, preimage, forgery), **LFSR** (tap recovery + keystream) and **ADFGX/ADFGVX detection**, each with a solve template where a template makes sense |
 
 ---
 
@@ -262,7 +262,34 @@ Current total: **172 tests, all green** (`python -m unittest discover -s tests`)
   `stereotyped_message` and `hastad_padded` therefore try the exact integer-root path
   first (when no reduction modulo n happens, which is the common CTF shape) and fall
   back to the lattice, which is where the time budget can run out on large moduli.
-- ECC beyond toy curves, multivariate Coppersmith, Boneh-Durfee, Bleichenbacher's
+- **Bivariate Coppersmith** (`coppersmith_bivariate`, `known_high_bits_two_primes`) is
+  measured at *a few bits per unknown* with `n` up to roughly 384 bits: the 12-column LLL
+  cap binds before the determinant's `XY < N^0.4`, and a 512-bit `n` is refused by a
+  basis-size preflight instead of running for ~74 s. Only integer roots are sought.
+  `known_high_bits_two_primes` takes the **unshifted** high part of each prime and applies
+  `2^shift` itself — passing an already-shifted value fails without saying why.
+- **The linearization lattice** (`linearize`, `recover_from_products`) handles
+  *determined* linear systems up to about 12 lattice coordinates (4-5 unknowns) in a few
+  seconds, and refuses above that. A system whose only coupling is a product
+  (`x*y == c` alone, or `x+y == s` together with `x*y == c`) is **not** solved by it —
+  that shape belongs to `coppersmith_bivariate`. `separate_variables` is exact-arithmetic
+  and takes no modulus: it turns already-proven monomials into the variables themselves
+  (the gcd of `x*y^2` and `x^2*y` is `x*y`).
+- **Shared private exponent across moduli** (`common_d_attack`, `common_d_lattice`),
+  measured with 512-bit moduli: m=3 reaches about 2^128 bits of `d`, m=4 about 2^150,
+  while **m=2 gains nothing** over the convergent stage already in `rsa_ops` and m=5 at
+  2^170 fails. No `N^(m/(m+1))` bound is claimed; the measured edge tracks the Gaussian
+  heuristic of the lattice.
+- **ADFGX / ADFGVX**: with the square known, read orders are exhaustive up to k=6
+  (`quick`), k=7 (`normal`) and k=8 (`deep`, ~15 s); k=9 is sometimes found by annealing
+  at `deep`, k=11/12 were not recovered. Without the square it answers only when the
+  square keyword is among the guesses *and* word-level evidence passes a measured gate —
+  otherwise `ok=False` with the best round trip offered as a hypothesis, because a single
+  message does not determine the square.
+- `scan_structured_gcd` reports a plain shared factor separately from an `N±1` structural
+  lead (only the former factors a modulus), ignores gcds below 32 bits as artefacts
+  (counted, not listed) and excludes duplicate moduli.
+- ECC beyond toy curves, Boneh-Durfee, Bleichenbacher's
   full attack: documented skeletons or absent — the tool reports the hypothesis and
   the gap rather than pretending.
 - Discrete log only via BSGS / Pohlig-Hellman; group orders with large prime factors
@@ -282,6 +309,7 @@ Current total: **172 tests, all green** (`python -m unittest discover -s tests`)
   cannot claim to have found the original one.
 - Playfair / Hill / columnar / bacon are lossy by design (X padding, I/J and U/V
   folding), so "round-trip" there means `decrypt(encrypt(x)) == prepared(x)`.
-- No web interface and no CI yet.
+- No web interface. CI runs the suite on Linux (3.10 and 3.12) and publishes to PyPI
+  through trusted publishing on `v*` tags, so a release needs no stored token.
 
 License: MIT — coolmoon & guaidao2.

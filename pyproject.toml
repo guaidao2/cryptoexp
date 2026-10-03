@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cryptoexp"
-version = "0.1.0a2"
+version = "0.2.0b1"
 description = "Crypto toolkit: dependency-free primitives, attack automation and analysis pipeline for CTF, security assessment and research"
 readme = "README.md"
 requires-python = ">=3.10"

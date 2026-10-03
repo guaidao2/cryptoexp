@@ -174,7 +174,7 @@ from .core.solve import (
     register_solver, list_solvers, generate as solve_script,
 )
 
-__version__ = "0.1.0a2"
+__version__ = "0.2.0b1"
 __author__ = "coolmoon & guaidao2"
 __license__ = "MIT"
 

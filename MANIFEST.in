@@ -3,6 +3,7 @@
 # the scratch `.tmp` directory into the published sdist.
 include README.md
 include README.zh-CN.md
+include CHANGELOG.md
 include LICENSE
 include pyproject.toml
 recursive-include src/cryptoexp *.py
