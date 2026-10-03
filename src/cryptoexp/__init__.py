@@ -152,6 +152,7 @@ from .utils.adfgvx import (
     adfgx_square, adfgvx_square, adfgx_encrypt, adfgx_decrypt,
     adfgvx_encrypt, adfgvx_decrypt, adfgvx_detect, adfgvx_crack,
 )
+from .utils.common_d import common_d_lattice, common_d_attack
 from . import hypothesis
 from .hypothesis import (
     evaluate as evaluate_hypotheses, list_hypotheses, register_hypothesis,
@@ -261,6 +262,8 @@ _CANDIDATE_EXPORTS = [
     # fractionating transposition ciphers (ADFGX / ADFGVX)
     "adfgx_encrypt", "adfgx_decrypt", "adfgvx_encrypt", "adfgvx_decrypt",
     "adfgvx_detect", "adfgvx_crack", "adfgx_square", "adfgvx_square",
+    # shared private exponent across moduli (convergent stage, then the SDAP lattice)
+    "common_d_attack", "common_d_lattice",
     # RSA attacks (extra) / keys
     "franklin_reiter", "hastad_padded", "stereotyped_message",
     "parity_oracle_attack", "lsb_oracle_attack", "rsa_recover_d_from_factors",

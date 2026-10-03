@@ -572,6 +572,19 @@ def auto_attack(n, e=65537, c=None, pairs=None, p=None, q=None, d=None,
         if r["ok"]:
             r["detail"] = "auto_attack: " + r.get("detail", "")
             return r
+        # Three or more moduli: the SDAP lattice reaches a larger shared d than any
+        # convergent can (measured: m=4 with 512-bit moduli recovered a 151-bit d that
+        # no single-modulus Wiener touched). It costs seconds and adds nothing for two
+        # moduli, hence the length guard. Imported here to keep the module import cheap.
+        if len(pairs) >= 3:
+            try:
+                from .common_d import common_d_lattice
+                r = common_d_lattice(list(pairs))
+            except Exception:
+                r = {"ok": False}
+            if r.get("ok"):
+                r["detail"] = "auto_attack: " + str(r.get("detail", ""))
+                return r
     r = fermat_attack(n, e, c)
     if r["ok"]:
         return r

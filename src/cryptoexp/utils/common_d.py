@@ -236,25 +236,22 @@ def _candidates(reduced):
     return sorted(out)
 
 
-def _measured_reach(bits, m):
-    """Measured reach, from this repository's own runs at 512-bit moduli.
+def _measured_reach(m):
+    """Measured edge in *bits of d* at 512-bit moduli, per number of moduli.
 
-    The lattice recovers d while the target vector is shorter than the shortest
-    vector the lattice can be expected to contain (its Gaussian heuristic). That
-    puts the practical edge near `n^((m+1)/(2m))`, *not* the optimistic
-    `n^(m/(m+1))` shape - at 512-bit moduli (bits of d, 3 instances per cell,
-    hit rate in brackets):
+    This is what the failure note quotes. The lattice recovers d while the target
+    vector `(d*e_i - k_i*n_i, ..., d)` is shorter than the shortest vector LLL can
+    be expected to find in the basis (its Gaussian heuristic, about n^(m/(m+1))
+    here) - that is what ties the edge to the modulus size rather than to
+    `n^((m+1)/(2m))`, which is the exponent on n and therefore ~2^341 at 512 bits
+    (a number that says nothing about d). Measured at 512-bit moduli, 3 instances
+    per cell:
 
-        m=2: 2^100 [0/3], 2^128 [0/3]        - the convergent stage is as good
-        m=3: 2^100 [3/3], 2^128 [3/3], 2^150 [0/3]
+        m=2: nothing at 2^100 .. 2^180 (0/3 every cell)
+        m=3: 2^100 [3/3], 2^128 [1/3], 2^150 [0/3]
         m=4: 2^128 [3/3], 2^150 [3/3], 2^170 [0/3]
-
-    m=4/d~2^150 is the cell where this module beats the convergent stage
-    outright (3/3 against 0/3), which is the reason the stage exists.
     """
-    if m <= 2:
-        return 0
-    return int(round(bits * (m + 1) / (2.0 * m)))
+    return {2: 0, 3: 128, 4: 150}.get(m, 150)
 
 
 def common_d_lattice(pairs, effort="normal"):
@@ -264,9 +261,10 @@ def common_d_lattice(pairs, effort="normal"):
     sharing one d. A supplied ciphertext makes the plaintexts available in the
     result as well.
 
-    effort: "normal" builds one lattice over all moduli; "high" additionally
-    reduces lattices built from every (m-1)-subset, which is worth the extra
-    time when the moduli are not all equally strong.
+    effort: "normal" builds one lattice over all moduli. "high" additionally
+    reduces lattices built from every (m-1)-subset - measured at 512-bit moduli
+    it produced no win that "normal" missed (m=5/d~2^170: both empty, 23s against
+    62s), so treat it as a spare knob, not a known improvement.
 
     Returns the standard multi-modulus result dict -- see the module docstring.
     It names the range that was actually reached when it fails, and it never
@@ -333,21 +331,20 @@ def common_d_lattice(pairs, effort="normal"):
         return out
 
     bits = max(n.bit_length() for _e, n, _c in items)
-    reach = _measured_reach(bits, m)
+    reach = _measured_reach(m)
     plain["tried"] = tried
     plain["plaintexts"] = [None] * m
     if reach:
-        covered = (f"The lattice covers roughly 2^{reach} bits of d at these sizes "
-                   f"(n^((m+1)/(2m))-flavoured, not n^(m/(m+1)))")
+        covered = (f"measured edge: about 2^{reach} bits of d at {bits}-bit moduli; "
+                   f"it moves with the modulus size as well as with m")
     else:
-        covered = ("At m=2 the lattice adds nothing measurable over the convergent "
+        covered = ("at m=2 the lattice adds nothing measurable over the convergent "
                    "stage at these sizes")
     plain["note"] = (
-        f"no shared d found by the SDAP lattice ({bits}-bit moduli, {m} of them, "
-        f"dimension {plain['dimension']}, {tried} reduced vectors examined). "
-        f"Measured range at 512-bit moduli: m=2 gets nothing the convergent stage "
-        f"does not already have; m=3 recovers d up to about 2^128 bits; m=4 up to "
-        f"about 2^150 bits. " + covered)
+        f"no shared d found by the SDAP lattice ({m} moduli of {bits} bits, "
+        f"dimension {plain['dimension']}, {tried} reduced vectors examined); "
+        f"{covered}. At 512-bit moduli the measured boundaries were m=3 ~ 2^128 "
+        f"bits of d and m=4 ~ 2^150")
     return plain
 
 
