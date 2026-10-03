@@ -2,7 +2,7 @@
 
     from cryptoexp import rsa_ops as R
     k = R.keygen(1024)
-    R.decrypt(k['d'], k['n'], c)
+    R.decrypt(c, k['d'], k['n'])   # decrypt(c, d, n) - the ciphertext comes first
     R.wiener_attack(e, n)          # → result dict
 
 Convention: every attack_* returns the same structure
@@ -114,17 +114,28 @@ def decrypt(c: int, d: int, n: int):
     return pow(c, d, n)
 
 
-def crt_decrypt(n, e, c, p, q, dp=None, dq=None) -> int:
-    """CRT-accelerated decryption (faster with dp/dq; falls back to d)"""
+def crt_decrypt(n, e, c, p, q, dp=None, dq=None):
+    """CRT-accelerated decryption (faster with dp/dq; falls back to d)
+
+    `n` must equal p*q: the factors are validated first, because handing over
+    mismatched values used to produce a silently wrong plaintext.
+    Returns: int normally, and **None** when e is not invertible mod phi (an earlier
+    version returned 0, which is indistinguishable from the plaintext 0 - it decrypts
+    to b'\\x00' and looks like a real answer).
+    """
+    if p <= 1 or q <= 1 or p * q != n:
+        return None
     if dp is not None and dq is not None:
         m1 = pow(c % p, dp, p)
         m2 = pow(c % q, dq, q)
     else:
         d = A.modinv(e, (p - 1) * (q - 1))
         if d is None:
-            return 0
+            return None
         m1, m2 = pow(c, d, p), pow(c, d, q)
     qinv = A.modinv(q, p)
+    if qinv is None:
+        return None
     h = (qinv * (m1 - m2)) % p
     return m2 + h * q
 
@@ -212,12 +223,17 @@ def broadcast_attack(e: int, pairs):
              "d", "note"}; the answer, when there is one, is result["plaintext"]
              (bytes), or result["factors"] / result["d"] for the factor attacks.
     """
-    pairs = [(int(c), int(n)) for c, n in pairs][:e]
+    # Input pairs are (n_i, c_i) - the same order `rsa_attacks.hastad_padded`
+    # documents. The order used to be reversed here while the docstring said
+    # (n_i, c_i), so code written from the docs failed with a misleading
+    # "moduli are not coprime". A.crt wants (residue, modulus), hence the swap.
+    pairs = [(int(c), int(n)) for n, c in pairs][:e]
     if len(pairs) < e:
         return _res(False, note=f"needs {e} pairs, only {len(pairs)} given")
     res = A.crt(pairs)
     if not res:
-        return _res(False, note="moduli are not coprime (switch to the shared-factor attack)")
+        return _res(False, note="moduli are not coprime (switch to the shared-factor attack); "
+                               "pairs must be given as (n_i, c_i)")
     root, exact = A.iroot(res[0], e)
     if not exact:
         return _res(False, note="CRT result is not an exact e-th power (padded plaintext?)")
@@ -441,7 +457,7 @@ def auto_attack(n, e=65537, c=None, pairs=None, p=None, q=None, d=None,
         if r["ok"]:
             return r
         if e <= 17:
-            r = broadcast_attack(e, [(cc, nn) for nn, cc in pairs])
+            r = broadcast_attack(e, [(nn, cc) for nn, cc in pairs])
             if r["ok"]:
                 return r
     if e <= 17 and c is not None:

@@ -212,7 +212,7 @@ def analyze_rsa(ctx: dict) -> dict:
         _emit(out, res, "shared_prime", "shared prime factor", "critical", "high",
               "two moduli share a prime factor")
         if not out["candidates"] and e and 2 <= e <= 17:
-            res = R.broadcast_attack(e, [(cv, nv) for nv, cv in pairs])
+            res = R.broadcast_attack(e, [(nv, cv) for nv, cv in pairs])
             _emit(out, res, "low_exponent_broadcast", "low-exponent broadcast (Håstad)",
                   "critical", "high", f"same e={e} across ciphers, CRT then integer root")
     elif len(ns) >= 2:

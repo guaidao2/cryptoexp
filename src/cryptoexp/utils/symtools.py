@@ -58,6 +58,11 @@ def cbc_flip_plaintext(ct: bytes, iv: bytes, offset: int, old: bytes, new: bytes
 
     Flipping ciphertext byte j in block N changes plaintext byte j in block N+1, so
     the caller can think purely in plaintext offsets. `ct` excludes the IV.
+
+    Returns: a 2-tuple `(new_iv, new_ct)`, ready to feed back into the decryption
+             routine. The shape was missing from this docstring, so a caller who
+             expected one buffer got `TypeError: unsupported operand type(s) for ^:
+             'tuple' and 'bytes'` (utils audit, 2026-10-03).
     """
     if len(old) != len(new):
         raise ValueError("old and new must be the same length")

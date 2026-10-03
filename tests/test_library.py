@@ -271,11 +271,14 @@ class TestRSAOps(unittest.TestCase):
         self.assertEqual(r['plaintext'], self.flag)
 
     def test_broadcast(self):
+        # pairs are (n_i, c_i), matching the docstring and hastad_padded's order;
+        # this test used to build them reversed, which "passed" only because the
+        # implementation was reversed too (found by the 2026-10-03 utils audit)
         e = 3
         pairs = []
         for i in range(3):
             n = ck.next_prime(2 ** 127 + i * 10 ** 6) * ck.next_prime(2 ** 128 + i * 10 ** 6)
-            pairs.append((pow(self.m, e, n), n))
+            pairs.append((n, pow(self.m, e, n)))
         r = ck.broadcast_attack(e, pairs)
         self.assertTrue(r['ok'], r['note'])
         self.assertEqual(r['plaintext'], self.flag)

@@ -195,6 +195,14 @@ def batch_gcd(moduli, progress=None):
         if len(members) < 2:
             continue
         ordered = sorted(members)
+        # Identical moduli are a duplicate-key finding, reported in `duplicates`, not a
+        # shared prime: gcd(n, n) = n passes every divisibility check, and a caller
+        # doing `q = n // factor` would get 1 out of it. The comment above `duplicates`
+        # promised this exclusion; the code did not do it until the 2026-10-03 audit.
+        if factor in duplicates:
+            rejected.append({"factor": factor, "indices": ordered,
+                             "reason": "duplicate modulus, not a shared prime"})
+            continue
         # Confirm by division before reporting. The remainder tree makes this true by
         # construction, so a failure here would mean the tree math is wrong: it is a
         # cheap, independent check that "we computed it" is really "it divides", and it
@@ -1215,7 +1223,12 @@ def detect_weak_prng(outputs, effort="normal"):
     result["state"] = best["state"]
     result["predict"] = best["predict"]
     result["detail"] = best["detail"]
-    result["weak_prng"] = best["confidence"] == "high"
+    # A family was identified and it replayed the observations - that IS the weak-PRNG
+    # verdict, whatever the confidence label says. Tying the flag to
+    # `confidence == "high"` reported False for the textbook 624-word MT19937 clone,
+    # because that case is deliberately labelled "medium" (624 words is exactly the
+    # information-theoretic minimum, so the recovery is right but not over-determined).
+    result["weak_prng"] = best["family"] is not None
     if len(hits) > 1:
         result["detail"] += ("; %d family/families reproduce this data, the "
                              "highest-priority one is reported"

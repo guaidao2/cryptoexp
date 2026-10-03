@@ -49,7 +49,11 @@ def lcm(a: int, b: int) -> int:
 
 def modinv(a: int, m: int):
     """Modular inverse; returns None when it does not exist
-    (never raises — the caller decides what to do)"""
+
+    None means gcd(a, m) != 1. The only input that raises is m = 0 (ZeroDivisionError
+    inside egcd) - an earlier docstring said "never raises", which is true only for
+    m >= 1.
+    """
     g, x, _ = egcd(a % m, m)
     if g != 1:
         return None

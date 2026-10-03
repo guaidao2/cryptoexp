@@ -367,6 +367,13 @@ def known_high_bits_factor(N: int, p_high: int, known_bits: int, total_bits: int
     On failure the same four keys are present with value None - the dict is always
     returned, so callers check `res["p"] is not None` rather than expecting no value.
     """
+    if not p_high or p_high <= 0:
+        # p_high = 0 means "no known bits", for which the polynomial below degenerates
+        # to x^1 and the coppersmith call divides by 2*a with a = 0 (ZeroDivisionError).
+        # The docstring promises the four-key dict on every path, so say so instead.
+        return {"p": None, "q": None, "root": None,
+                "note": "p_high must be positive: with no known high bits there is no "
+                        "Coppersmith polynomial to build"}
     total_bits = total_bits or N.bit_length()
     shift = max(1, total_bits // 2 - known_bits)
     X = 1 << shift

@@ -149,7 +149,7 @@ _rsa("rsa_broadcast", "e ciphertexts under the same e → CRT then take the root
      ("e≤17", "e pairs of (n, c)"),
      lambda d: d.get("e") and 2 <= d["e"] <= 17
      and len(d["n_list"]) >= d["e"] and len(d["c_list"]) >= d["e"],
-     lambda d: R.broadcast_attack(d["e"], list(zip(d["c_list"], d["n_list"]))))
+     lambda d: R.broadcast_attack(d["e"], list(zip(d["n_list"], d["c_list"]))))
 
 _rsa("rsa_wiener", "d too small → a convergent of the continued fraction of e/n",
      ("n", "e"),

@@ -286,7 +286,12 @@ def glibc_rand_values(seed: int, count: int) -> list:
 
 
 def glibc_rand_recover(outputs) -> dict:
-    """Recover the 31-word TYPE_3 state from >= 31 consecutive `rand()` outputs
+    """Recover the 31-word TYPE_3 state from roughly 100 consecutive `rand()` outputs
+
+    Fewer is usually not enough: the hidden low bits are only pinned once enough
+    carry equations accumulate (measured: 96 outputs give a unique state, 40 leave
+    ~20 free bits and the function then returns None rather than guessing). An earlier
+    docstring said ">= 31", which is the size of the state, not of the input needed.
 
     Returns {"state": [31 ints], "index": int} or None, where `state` is the array
     as it stands *before* the first observation (write/read pointers at their first

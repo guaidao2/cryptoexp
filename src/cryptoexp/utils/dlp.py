@@ -97,8 +97,27 @@ def discrete_log(g, h, p, order=None, max_m: int = 1 << 22):
                     "hand in the workbench"}
 
 
-def is_smooth(n: int, bound: int = 10 ** 6):
-    """Is n B-smooth (a feasibility pre-check for Pohlig-Hellman)"""
+def is_smooth(n: int, bound: int = 10 ** 6) -> bool:
+    """True when every prime factor of n is <= bound, False otherwise
+
+    False means "not smooth **or** not factorable within this budget" - the two are
+    deliberately conflated here because the caller only asks "can Pohlig-Hellman use
+    this order". When you need to tell them apart, or want the factors themselves,
+    call `smooth_with_factors`, which returns the pair.
+
+    An earlier version returned `(bool, factors)` while the name said bool, so
+    `if dlp.is_smooth(n, b):` was always true (a non-empty tuple) - and it shadowed
+    the boolean `modular.is_smooth` of the same name.
+    """
+    return smooth_with_factors(n, bound)[0]
+
+
+def smooth_with_factors(n: int, bound: int = 10 ** 6):
+    """(is_smooth, factors) — the factors are None when they could not be found
+
+    Returns: a 2-tuple `(bool, dict|None)`. The None case means "unknown", not
+             "not smooth", so a caller that cares must not treat it as False.
+    """
     fac = factor_limited(n, max_steps=300000)
     if fac is None:
         return False, None
@@ -114,7 +133,7 @@ def dlog_feasibility(p, bound: int = 10 ** 6):
     order = p - 1
     if p.bit_length() <= 48:
         return {"feasible": True, "why": f"modulus is only {p.bit_length()} bits, BSGS suffices"}
-    smooth, fac = is_smooth(order, bound)
+    smooth, fac = smooth_with_factors(order, bound)
     if smooth:
         return {"feasible": True,
                 "why": f"group order {order} is {bound}-smooth → Pohlig-Hellman"}

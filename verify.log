@@ -1,0 +1,36 @@
+﻿python : ................................D:\编程\cryptokit\tests\test_challenges.py:172: ResourceWarning: unclosed file <
+_io.TextIOWrapper name='D:\\编程\\cryptokit\\challenges\\knapsack.txt' mode='r' encoding='utf-8'>
+所在位置 行:1 字符: 324
++ ... = Measure-Command { python -m unittest discover -s tests 2>&1 | Out-F ...
++                         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (..................coding='utf-8'>:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  text = open(os.path.join(CH_DIR, "knapsack.txt"), encoding="utf-8").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.........D:\编程\cryptokit\tests\test_challenges.py:255: ResourceWarning: unclosed file <_io.TextIOWrapper name='D:\\编程\\
+cryptokit\\.tmp\\solves\\solve_rsa_small_e_rsa_small_e.txt.py' mode='r' encoding='utf-8'>
+  src = open(path, encoding="utf-8").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+D:\编程\cryptokit\tests\test_challenges.py:255: ResourceWarning: unclosed file <_io.TextIOWrapper name='D:\\编程\\cryptokit
+\\.tmp\\solves\\solve_rsa_wiener_rsa_wiener.txt.py' mode='r' encoding='utf-8'>
+  src = open(path, encoding="utf-8").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+D:\编程\cryptokit\tests\test_challenges.py:255: ResourceWarning: unclosed file <_io.TextIOWrapper name='D:\\编程\\cryptokit
+\\.tmp\\solves\\solve_xor_single_xor_single.txt.py' mode='r' encoding='utf-8'>
+  src = open(path, encoding="utf-8").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+D:\编程\cryptokit\tests\test_challenges.py:255: ResourceWarning: unclosed file <_io.TextIOWrapper name='D:\\编程\\cryptokit
+\\.tmp\\solves\\solve_classical_classical_caesar.txt.py' mode='r' encoding='utf-8'>
+  src = open(path, encoding="utf-8").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+D:\编程\cryptokit\tests\test_challenges.py:255: ResourceWarning: unclosed file <_io.TextIOWrapper name='D:\\编程\\cryptokit
+\\.tmp\\solves\\solve_lcg_lcg.txt.py' mode='r' encoding='utf-8'>
+  src = open(path, encoding="utf-8").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.......................................................................................................................
+............
+----------------------------------------------------------------------
+Ran 172 tests in 167.938s
+
+OK

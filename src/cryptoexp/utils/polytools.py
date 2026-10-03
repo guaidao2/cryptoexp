@@ -614,7 +614,10 @@ def _resultant_rec(f, g, p):
     if n == 0:
         return g[0] ** m
     if m < n:
-        return _resultant_rec(g, f, p)
+        # Swapping the arguments flips the resultant by (-1)^(m*n); without this
+        # factor res(f, g) and res(g, f) agreed for odd degrees, which breaks both
+        # antisymmetry and the agreement with the p=None (integer) path.
+        return (-1) ** (m * n) * _resultant_rec(g, f, p)
     q, r = poly_divmod(f, g, p)
     if q is None:
         return None

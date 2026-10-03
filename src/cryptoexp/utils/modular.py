@@ -89,26 +89,33 @@ def jacobi_symbol(a: int, n: int) -> int:
 def kronecker_symbol(a: int, n: int) -> int:
     """Kronecker symbol (a/n) → 1 / -1 / 0 for *any* integer n (including 0, ±1, even)
 
-    Definition used here: (a/n) = (a/|n|), and |n| is split into its 2-power part and its
-    odd part. For the 2-power part the classical rules apply — the factor is
-    (-1)^((a^2-1)/8) per factor 2, so a ≡ 3 or 5 (mod 8) flips the sign — and the odd
-    part goes through the Jacobi symbol. Two conventions are worth spelling out because
-    they differ between libraries: (a/-1) = -1 exactly when a < 0, and n = 0 gives 1 for
-    |a| = 1 and 0 otherwise.
+    Definition used here: for n > 0, (a/n) is the Jacobi symbol (it depends only on
+    a mod n, so a negative numerator is reduced, not sign-flipped); for n < 0,
+    (a/n) = (a/-1)·(a/|n|) with (a/-1) = sign(a); n = 0 gives 1 for |a| = 1 and 0
+    otherwise. |n| is split into its 2-power part and its odd part: for each factor 2
+    the sign flips when a ≡ 3 or 5 (mod 8), and the odd part goes through
+    `jacobi_symbol`.
 
-    Do not confuse the two 2-related symbols: (2/a) for odd a is (-1)^((a^2-1)/8), while
-    (a/2) is (+1) for a ≡ ±1 (mod 8) and (-1) for a ≡ ±3 (mod 8). Only the second is a
-    Kronecker numerator rule, and mixing them up is the usual source of a wrong sign.
+    Do not confuse the two 2-related symbols: (2/a) for odd a is (-1)^((a^2-1)/8),
+    while (a/2) is (+1) for a ≡ ±1 (mod 8) and (-1) for a ≡ ±3 (mod 8). Only the
+    second is a Kronecker numerator rule, and mixing them up is the usual source of a
+    wrong sign.
     """
     if n == 0:
         return 1 if abs(a) == 1 else 0
-    n = abs(n)
     result = 1
-    # (a/-1) = -1 exactly when a < 0, and the |n| == 1 case must go through it: for
-    # n = -1 the 2-adic loop below is skipped entirely, so an early `return 1` here
-    # would report (+1) and lose the sign of a (kronecker(3,-1) must be -1).
-    if a < 0:
-        result = -result
+    if n < 0:
+        # The sign factor belongs to a NEGATIVE modulus only. Applying it whenever
+        # a < 0 (an earlier bug) made kronecker disagree with jacobi for every
+        # negative numerator, even though for n > 0 the two symbols are identical by
+        # definition: (-1/3) is -1, not +1, and (a/1) is 1 for every a.
+        if a == 0:
+            return 0
+        if a < 0:
+            result = -result
+        n = -n
+    if n == 1:
+        return result
     while n % 2 == 0:
         n //= 2
         if a % 2 == 0:

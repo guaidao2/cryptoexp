@@ -35,10 +35,17 @@ def ecdsa_nonce_reuse(n, r, s1, s2, h1, h2):
     """Recover the private key when two signatures reused the same nonce k
 
     k = (h1 - h2) / (s1 - s2) mod n, then d = (s1*k - h1) / r mod n.
-    Both k and d are verified by re-deriving the signatures, so a wrong input
-    cannot masquerade as a success.
-    Returns: the standard result dict; the recovered private key is
-             result["d"] and the reused nonce is result["meta"]["k"].
+
+    What this cannot do (stated because an earlier docstring claimed otherwise): the
+    two signature equations are satisfied by the derived (k, d) *by construction*, for
+    any input, so there is no algebraic self-check that would detect "the nonces were
+    not actually reused". With unrelated signatures the function still returns a
+    (k, d) pair that reproduces them - the pair is simply not the signer's key.
+    Verify against the signer's public key (d*G == Q) before trusting the result;
+    `dsa_nonce_reuse` can do that check when it is given `y`, this one has no curve
+    parameter.
+    Returns: the standard result dict; the recovered private key is result["d"] and
+             the nonce is result["meta"]["k"].
     """
     denom = (s1 - s2) % n
     inv = A.modinv(denom, n)
@@ -49,8 +56,9 @@ def ecdsa_nonce_reuse(n, r, s1, s2, h1, h2):
     if r_inv is None:
         return _res(False, note="r is not invertible mod n")
     d = (s1 * k - h1) * r_inv % n
-    return _res(True, d=d, meta={"k": k},
-                detail=f"nonce k recovered, private key d = {d}")
+    return _res(True, d=d, meta={"k": k, "verified": False},
+                detail=f"nonce k recovered, private key d = {d}; the equations hold by "
+                       f"construction, so confirm d against the public key")
 
 
 def dsa_nonce_reuse(p, q, g, y, r, s1, s2, h1, h2):
@@ -72,15 +80,27 @@ def dsa_nonce_reuse(p, q, g, y, r, s1, s2, h1, h2):
     # verify: the public key must match g^x
     if y is not None and pow(g, x, p) != y % p:
         return _res(False, note="recovered x does not reproduce the public key y")
-    return _res(True, d=x, meta={"k": k}, detail=f"private key x = {x}")
+    return _res(True, d=x, meta={"k": k, "verified": y is not None},
+                detail=f"private key x = {x}")
 
 
 def ecdsa_recover_k(n, r, s, h, d):
-    """Recover the nonce of a *known* private key (useful for bias studies)"""
-    r_inv = A.modinv(r, n)
-    if r_inv is None:
+    """Recover the nonce k of a signature whose private key d is known
+
+    From s = k^-1 (h + r*d) mod n it follows that
+
+        k = (h + r*d) / s  mod n
+
+    (dividing by **s**, not by r - an early version divided by r, which returned a
+    plausible-looking wrong nonce for every input; the parameter s was silently
+    unused, which is the kind of bug that survives a test suite that never calls the
+    function). Returns None when s is not invertible mod n.
+    Returns: int or None (an int, not a result dict - this is a helper, not an attack).
+    """
+    s_inv = A.modinv(s % n, n)
+    if s_inv is None:
         return None
-    return (h + r * d) * r_inv % n
+    return (h + r * d) * s_inv % n
 
 
 def ecdsa_verify(px, py, a, b, p, gx, gy, r, s, h):
@@ -142,7 +162,12 @@ def rsa_e3_signature_forge(n, digest_info: bytes, tail_bits: int = 32,
 
     We search over the number of trailing zero bits until the cube starts exactly
     with the expected DigestInfo, and we verify that prefix before returning.
-    Returns {"ok", "signature": int, "recovered": bytes, "detail"}.
+
+    Returns: the standard result dict. Where the pieces live: the forged signature is
+             result["d"] (an int, so it can be fed straight to a verification routine)
+             and the bytes sig^3 mod n that matched are result["meta"]["recovered"].
+             An earlier docstring claimed fresh keys named "signature"/"recovered",
+             which raised KeyError for anyone who trusted `help()`.
     """
     if isinstance(digest_info, str):
         digest_info = digest_info.encode()
