@@ -62,6 +62,7 @@ _MAX_COLS = 12          # ... and more than 12 columns, so the shift set must fi
 _SYLV_DIM_CAP = 14      # Sylvester matrix dimension for poly2_resultant (d^3 polynomial ops)
 _POLY_DEG_CAP = 5000    # give up on a univariate intermediate beyond this degree
 _SCAN_DIVISORS = 2000   # divisor scan budget inside _int_roots
+_SCAN_MAX_BITS = 40     # ... and only while the constant term is this small
 _DEFAULT_TIME_BUDGET = 60.0
 
 
@@ -828,21 +829,25 @@ def _int_roots(coeffs, shift, max_tries=_SCAN_DIVISORS):
                         roots.append(num // (2 * c2))
         return sorted(set(roots))
     if d >= 3:
-        # divisor scan of the constant term: divisibility is a cheap filter, but the
-        # only thing that ever puts a root in the list is an exact evaluation
+        # Divisor scan of the constant term. A big constant term (which is exactly what
+        # a degree-r short-vector polynomial has: bit size ~ r * log2(N)) makes the scan
+        # hopeless, so it is only attempted while the constant term stays under
+        # _SCAN_MAX_BITS. Measured: without this guard the 128-bit known-high-bits case
+        # ran for over ten minutes inside this loop, with the guard it is instant.
         c0 = abs(p[0]) if p[0] else 0
-        bound = int(shift) if isinstance(shift, int) and shift > 0 else 0
-        found = 0
-        r = 1
-        while c0 and r * r <= c0 and found < max_tries:
-            if c0 % r == 0:
-                for cand in (r, -r, c0 // r, -(c0 // r)):
-                    found += 1
-                    if bound and abs(cand) >= bound:
-                        continue
-                    if cand not in roots and _poly_eval_int(p, cand) == 0:
-                        roots.append(cand)
-            r += 1
+        if c0 and c0.bit_length() <= _SCAN_MAX_BITS:
+            bound = int(shift) if isinstance(shift, int) and shift > 0 else 0
+            found = 0
+            r = 1
+            while c0 and r * r <= c0 and found < max_tries:
+                if c0 % r == 0:
+                    for cand in (r, -r, c0 // r, -(c0 // r)):
+                        found += 1
+                        if bound and abs(cand) >= bound:
+                            continue
+                        if cand not in roots and _poly_eval_int(p, cand) == 0:
+                            roots.append(cand)
+                r += 1
     return sorted(set(roots))
 
 
@@ -963,18 +968,22 @@ def _shift_rows(f, N, deg_bounds, max_rows=_MAX_ROWS, max_cols=_MAX_COLS):
     overflow the column budget while contributing no extra monomials. Each candidate is
     built here and the caller walks a ladder from rich to poor until one fits.
     """
-    m = len(deg_bounds) - 1
-    fm = poly2_pow(f, m)
-    rows = []
-    for k in range(m + 1):
-        if k == m:
-            base = fm
-        else:
-            base = poly2_scale(poly2_pow(f, k), N ** (m - k))
-        dk = deg_bounds[k]
-        for i in range(dk + 1):
-            for j in range(dk + 1 - i):
-                rows.append((poly2_shift_y(poly2_shift_x(base, i), j), i, j))
+    try:
+        m = len(deg_bounds) - 1
+        fm = poly2_pow(f, m)
+        rows = []
+        for k in range(m + 1):
+            if k == m:
+                base = fm
+            else:
+                base = poly2_scale(poly2_pow(f, k), N ** (m - k))
+            dk = deg_bounds[k]
+            for i in range(dk + 1):
+                for j in range(dk + 1 - i):
+                    rows.append((poly2_shift_y(poly2_shift_x(base, i), j), i, j))
+    except (OverflowError, MemoryError):
+        # an intermediate power blew up: report "does not fit" rather than raising
+        return None, None
     if not rows:
         return None, None
     mon = set()
@@ -985,31 +994,148 @@ def _shift_rows(f, N, deg_bounds, max_rows=_MAX_ROWS, max_cols=_MAX_COLS):
     return rows, sorted(mon)
 
 
-def _shift_ladder(m, t):
-    """Candidate degree windows, richest first, for `coppersmith_bivariate`
+def _shift_polys(f, N, m, order, max_rows=_MAX_ROWS, max_cols=_MAX_COLS):
+    """Greedily assemble a shift lattice that is exactly bounded by the caps
 
-    A small fixed ladder rather than a search: each entry is (label, deg_bounds) and the
-    first one that fits 12x12 is used. The richest windows are the textbook Coron sets;
-    when they overflow, the window at the highest power is tightened first because it is
-    the one that costs both rows and columns.
+    Rows are x^i * y^j * f^k * N^(m-k) for k < m and x^i * y^j * f^m for k == m. A row
+    also brings its OWN monomials, so a row can only be added while every monomial it
+    contains still fits in the <= max_cols column set; otherwise the row would not be an
+    integer combination of the columns and the lattice would be malformed. That is why
+    the set is built greedily instead of from a rectangular degree window: a window
+    silently overshoots the column budget once f^2 (degree 2 in each variable) enters,
+    and the overshoot is what kept every 12x12 attempt from carrying a bound.
+    `order` is a list of (i, j, k) candidates in the order they are offered.
+    Returns (rows, monomials) or (None, None).
     """
-    out = [("m=%d,t=%d" % (m, t), [m + t] * (m + 1))]
-    for hi in range(m + t, 0, -1):
-        for low in range(hi, -1, -1):
-            bounds = [hi] * m + [low]
-            out.append(("m=%d,staircase %s" % (m, bounds), bounds))
+    fm = poly2_pow(f, m)
+    rows = []
+    monomials = set()
+    for (i, j, k) in order:
+        if len(rows) >= max_rows:
+            break
+        if k == m:
+            base = fm
+        else:
+            base = poly2_scale(poly2_pow(f, k), N ** (m - k))
+        poly = poly2_shift_y(poly2_shift_x(base, i), j)
+        if not poly:
+            continue
+        need = monomials | set(poly)
+        if len(need) > max_cols:
+            continue
+        monomials = need
+        rows.append((poly, i, j))
+    if not rows:
+        return None, None
+    return rows, sorted(monomials)
+
+
+def _shift_orders(m, t, max_shift):
+    """Candidate orderings of the (i, j, k) shifts, most promising first
+
+    Three families are offered because which one fits 12x12 depends on the instance:
+      * "low first": small i + j first, so cheap high-power shifts enter before the
+        monomials of f^m (degree 2m) eat the column budget;
+      * "univariate first": only the shifts with j == 0 (or i == 0), which reproduces the
+        univariate Coppersmith bound in the direction that is not bounded;
+      * "balanced": by max(i, j), then by k descending (large f-powers carry the bound,
+        so they are offered while columns are still free).
+    The univariate-only shifts are always offered first in every family: they cost no
+    extra columns beyond the ones f^k already needs.
+    """
+    shifts = []
+    for k in range(m + 1):
+        for i in range(max_shift + 1):
+            for j in range(max_shift + 1):
+                if i + j == 0 and k == 0:
+                    continue  # k == 0 already contributes the plain N^m row
+                shifts.append((i, j, k))
+    univ = [s for s in shifts if s[0] == 0 or s[1] == 0]
+    rest = [s for s in shifts if s not in univ]
+    low_first = sorted(univ) + sorted(rest, key=lambda s: (s[0] + s[1], s[2], s[0], s[1]))
+    balanced = sorted(univ) + sorted(rest, key=lambda s: (-s[2], max(s[0], s[1]),
+                                                          s[0] + s[1]))
+    small_first = sorted(univ) + sorted(rest, key=lambda s: (max(s[0], s[1]), s[2],
+                                                            s[0] + s[1]))
+    return [("univariate-first", univ + low_first),
+            ("low-first", low_first),
+            ("balanced", balanced),
+            ("small-first", small_first)]
+
+
+def _candidate_lattices(f, N, m, t, max_shift=4):
+    """All shift lattices the greedy builder can reach, deduplicated, best first
+
+    Best is judged by column count descending (a wider monomial set means more of the
+    bound is carried), then by row count descending. Bounded work: four orderings times
+    one greedy pass each, and every pass is capped by the 12x12 lattice limits.
+    """
+    out = []
     seen = set()
-    uniq = []
-    for label, bounds in out:
-        key = tuple(bounds)
+    for label, order in _shift_orders(m, t, max_shift):
+        rows, mon = _shift_polys(f, N, m, order)
+        if rows is None:
+            continue
+        key = tuple(mon)
         if key in seen:
             continue
         seen.add(key)
-        uniq.append((label, list(bounds)))
-    return uniq
+        out.append(("m=%d,t=%d,%s %dx%d" % (m, t, label, len(rows), len(mon)),
+                    rows, mon))
+    out.sort(key=lambda item: (-len(item[2]), -len(item[1])))
+    return out
 
 
 # ────────────────────────── bivariate Coppersmith ──────────────────────────
+
+def _run_window(f, N, X, Y, rows, monomials, label, time_budget):
+    """One full attack attempt over one shift lattice -> result dict
+
+    Split out of `coppersmith_bivariate` so the ladder and the test harness drive the
+    same code path. Returns the library result dict; `ok` is only ever True when a root
+    has been verified by substitution.
+    """
+    dim_r, dim_c = len(rows), len(monomials)
+    # lattice: column (i, j) holds the coefficient of x^i y^j times X^i Y^j
+    col_of = {key: idx for idx, key in enumerate(monomials)}
+    scaling = [pow(X, i) * pow(Y, j) for (i, j) in monomials]
+    basis = []
+    for poly, _, _ in rows:
+        row = [0] * dim_c
+        for key, c in poly.items():
+            row[col_of[key]] = c * scaling[col_of[key]]
+        basis.append(row)
+    # a non-square basis makes the plain Gram-Schmidt inside .lattice.lll divide by a
+    # zero squared norm, so pad with zero rows up to the number of columns
+    while len(basis) < dim_c:
+        basis.append([0] * dim_c)
+    reduced = L.lll(basis)
+    if reduced is None:
+        return {"ok": False, "roots": [], "factor": None, "skipped": True,
+                "detail": "LLL refused the lattice (%d x %d, %s)" % (dim_r, dim_c, label),
+                "note": ""}
+
+    # undo the X^i Y^j column scaling: a short vector is a polynomial if the division
+    # comes out exact, otherwise it is not a lattice polynomial we can use
+    polys = []
+    for row in reduced:
+        if not any(row):
+            continue
+        poly = {}
+        ok = True
+        for idx, key in enumerate(monomials):
+            v = row[idx]
+            if not v:
+                continue
+            s = scaling[idx]
+            if v % s:
+                ok = False
+                break
+            poly[key] = v // s
+        if ok and poly:
+            polys.append(poly)
+    return _extract_roots(polys, f, N, X, Y, label, dim_r, dim_c, time_budget)
+
 
 def coppersmith_bivariate(f, N, X, Y, m=None, t=None, time_budget=60.0):
     """Small roots (x0, y0) of f(x, y) == 0 (mod N) with |x0| < X, |y0| < Y
@@ -1018,21 +1144,23 @@ def coppersmith_bivariate(f, N, X, Y, m=None, t=None, time_budget=60.0):
         f: bivariate polynomial {(i, j): c} with integer coefficients (see module doc)
         N: modulus
         X, Y: bounds on the two roots
-        m: lattice depth (f^m shifts). Default 2 - measured: m=1 finds nothing on the
-           test instances, m=3 is over the 12-vector cap of our LLL.
-        t: extra shift exponent for the f^m rows. Default 1.
-        time_budget: seconds; checked between the expensive stages. It cannot interrupt
+        m: lattice depth (the largest power f^m used). Default 2.
+        t: how much room the f^m window gets. Default 1.
+        time_budget: seconds, checked between the expensive stages; it cannot interrupt
            a running pure-Python LLL, so the real stop is the 12x12 dimension cap.
     Returns:
         {"ok": bool, "roots": [(x, y), ...], "factor": p|None, "detail": str, "note": str}
         Every pair in "roots" satisfies f(x, y) % N == 0 AND |x| < X AND |y| < Y - an
         unverified candidate never reaches the list, it only appears in "note".
         "factor" is a non-trivial factor of N when one falls out (gcd of a root with N).
-    Honest limits: the shift lattice is capped at 12 rows x 12 columns because
-    `.lattice.lll` refuses more, so this stays a CTF-scale attack. Measured on this
-    machine: 128-bit N with ~44 known high bits of both primes -> recovered in about
-    2 s; 512-bit N with the top half of both primes known is OUT of range (that needs
-    the linearisation/Coppersmith-with-two-shifts literature or a real LLL).
+    Method: the Howgrave-Graham/Coron shift lattice x^i y^j f^k N^(m-k) plus the extra
+    f^m shifts, LLL-reduced by `.lattice.lll`, the short vectors turned back into integer
+    polynomials, then y is eliminated with `poly2_resultant` and the common x-coordinate
+    is taken from the GCD over Q[x] of two resultants. Candidates are only reported after
+    an exact substitution.
+    Honest limits: see the module docstring - this is a 12x12 pure-Python lattice and it
+    reaches roughly 2^60 of N for the two-unknown case; a 512-bit n with half of both
+    primes known is far outside that.
     """
     t0 = time.time()
     f = _reduce_poly2(f, None)
@@ -1059,77 +1187,39 @@ def coppersmith_bivariate(f, N, X, Y, m=None, t=None, time_budget=60.0):
     if t < 0:
         t = 0
 
-    # walk the ladder from the richest shift window down until one fits the 12x12 cap
-    chosen = None
+    # try every lattice the greedy builder can reach, widest first, and stop at the first
+    # verified root; the labels of what was tried end up in the failure note
     tried = []
-    for label, bounds in _shift_ladder(m, t):
-        rows, monomials = _shift_rows(f, N, bounds)
-        if rows is None:
-            tried.append("D=%s" % (bounds,))
+    best = None
+    skipped = 0
+    for label, rows, monomials in _candidate_lattices(f, N, m, t):
+        if time.time() - t0 > time_budget:
+            break
+        tried.append("%s" % label)
+        res = _run_window(f, N, X, Y, rows, monomials, label, time_budget)
+        if res.get("skipped"):
+            skipped += 1
             continue
-        chosen = (label, rows, monomials)
-        break
-    if chosen is None:
+        res["detail"] = res["detail"] + ", %.1fs total" % (time.time() - t0)
+        if res["ok"]:
+            return res
+        if best is None:
+            best = res
+    if best is None:
         return {"ok": False, "roots": [], "factor": None,
-                "detail": "no shift window for m=%d t=%d fits the %dx%d lattice cap "
-                          "(tried %s)" % (m, t, _MAX_ROWS, _MAX_COLS, ", ".join(tried[:6])),
+                "detail": "the greedy builder could not assemble any shift lattice for "
+                          "m=%d t=%d under the %dx%d cap (LLL refusals: %d)"
+                          % (m, t, _MAX_ROWS, _MAX_COLS, skipped),
                 "note": "widen by lowering m/t (smaller lattice) or shrinking X/Y"}
-    label, rows, monomials = chosen
-    dim_r, dim_c = len(rows), len(monomials)
-
-    # lattice: column (i, j) holds the coefficient of x^i y^j times X^i Y^j
-    col_of = {key: idx for idx, key in enumerate(monomials)}
-    scaling = [pow(X, i) * pow(Y, j) for (i, j) in monomials]
-    basis = []
-    for poly, _, _ in rows:
-        row = [0] * dim_c
-        for key, c in poly.items():
-            row[col_of[key]] = c * scaling[col_of[key]]
-        basis.append(row)
-    # a non-square basis makes the plain Gram-Schmidt inside .lattice.lll divide by a
-    # zero squared norm, so pad with zero rows up to the number of columns
-    while len(basis) < dim_c:
-        basis.append([0] * dim_c)
-    if time.time() - t0 > time_budget:
-        return {"ok": False, "roots": [], "factor": None,
-                "detail": "time budget spent before the LLL reduction (%s)" % label,
-                "note": "spent %.1fs; lower m/t or shrink X/Y and retry"
-                        % (time.time() - t0)}
-    reduced = L.lll(basis)
-    if reduced is None:
-        return {"ok": False, "roots": [], "factor": None,
-                "detail": "LLL refused the lattice (%d x %d, %s)" % (dim_r, dim_c, label),
-                "note": "over the 12x12 dimension cap of the pure-Python LLL; "
-                        "lower m/t or shrink X/Y"}
-
-    # undo the X^i Y^j column scaling: a short vector is a polynomial if the division
-    # comes out exact, otherwise it is not a lattice polynomial we can use
-    polys = []
-    for row in reduced:
-        if not any(row):
-            continue
-        poly = {}
-        ok = True
-        for idx, key in enumerate(monomials):
-            v = row[idx]
-            if not v:
-                continue
-            s = scaling[idx]
-            if v % s:
-                ok = False
-                break
-            poly[key] = v // s
-        if ok and poly:
-            polys.append(poly)
-
-    return _extract_roots(polys, f, N, X, Y, label, dim_r, dim_c, time.time() - t0,
-                          time_budget)
+    best["note"] = (best["note"] + " | no lattice in the set worked (tried %s)"
+                    % (tried[:6],)).strip()
+    return best
 
 
-def _extract_roots(polys, f, N, X, Y, label, dim_r, dim_c, elapsed, time_budget):
+def _extract_roots(polys, f, N, X, Y, label, dim_r, dim_c, time_budget):
     """Turn the short-vector polynomials into verified roots (never a guess)"""
-    detail = ("lattice %dx%d %s, %d usable polynomial(s), %.1fs in LLL"
-              % (dim_r, dim_c, label, len(polys), elapsed))
+    detail = ("lattice %dx%d %s, %d usable polynomial(s)"
+              % (dim_r, dim_c, label, len(polys)))
     verified = []
     unverified = []
     factor = None
@@ -1152,7 +1242,8 @@ def _extract_roots(polys, f, N, X, Y, label, dim_r, dim_c, elapsed, time_budget)
             if 1 < g < N:
                 factor = g
 
-    # stage 1: GCD over Q[x] of the resultants (pairs) - the linear factor is the root
+    # stage 1: pairwise resultants eliminate y, the GCD over Q[x] of two of them isolates
+    # the x-coordinate of the common root (this is the path that actually works)
     if len(polys) >= 2 and time.time() < time_budget:
         res = []
         seen_r = set()
@@ -1167,19 +1258,26 @@ def _extract_roots(polys, f, N, X, Y, label, dim_r, dim_c, elapsed, time_budget)
                 seen_r.add(prim)
                 res.append(list(prim))
         gcds = []
+        seen_g = set()
         for i in range(len(res)):
             for j in range(i + 1, len(res)):
                 g = L._poly_gcd_rational(res[i], res[j])
-                if g and 1 <= len(g) <= 4:
-                    gcds.append([int(c) for c in g])
+                if not g or not (1 <= len(g) <= 6):
+                    continue
+                key = tuple(int(c) for c in g)
+                if key in seen_g:
+                    continue
+                seen_g.add(key)
+                gcds.append(list(key))
         for g in gcds:
             for x0 in _int_roots(g, X):
                 for poly in polys:
                     for y0 in _solve_for_y(poly, x0, Y):
                         _record(x0, y0, poly)
 
-    # stage 2: the bilinear separator - a single exact quadratic solve that needs no
-    # lattice at all (this is the path the known-high-bits case actually takes)
+    # stage 2: the bilinear separator (exact quadratic, no lattice). It applies only when
+    # the negation of f(x, -y) also vanishes at the root, which the RSA shape does not
+    # always satisfy, so it is an opportunistic extra - never the only path.
     if not verified and time.time() < time_budget:
         for (x0, y0) in _bilinear_candidates(f, X, Y):
             for poly in polys:

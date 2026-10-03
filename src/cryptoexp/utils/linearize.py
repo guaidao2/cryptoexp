@@ -100,6 +100,12 @@ refuses any shape above 12 rows or 12 columns - that cap is the real limit):
 
 Pure standard library; the modulus arithmetic, gcds and the integer roots come from
 `.algebra`, the reduction from `.lattice`.
+
+The public surface: `parse_monomial` (spelling), `monomials_of` and `check_solution`
+(bookkeeping and the substitution gate), `linearize` (the lattice), `solve_linearized`
+(the same plus the caller's verifier), `recover_from_products` (the products shape),
+and `separate_variables` (the gcd/root step that turns known monomial values into the
+variables themselves).
 """
 
 import math
@@ -111,7 +117,7 @@ from . import lattice as L
 
 __all__ = [
     "linearize", "solve_linearized", "monomials_of", "check_solution",
-    "recover_from_products", "parse_monomial",
+    "recover_from_products", "separate_variables", "parse_monomial",
 ]
 
 # `.lattice.lll` refuses more than 12 rows or 12 columns, so the lattice is assembled inside
@@ -137,7 +143,7 @@ _EFFORTS = ("light", "normal", "heavy")
 _MAX_COMMON_MODULUS_BITS = 8192
 
 
-# ────────────────────────── monomials ──────────────────────────
+# ---- monomials ---------------------------------------------------------------------
 
 def parse_monomial(text):
     """Build a monomial from a string: "x" -> ("x",), "x^2*y" -> ("x","x","y"), "" -> ()
@@ -222,7 +228,7 @@ def monomials_of(equations):
     return sorted(seen, key=_mono_key)
 
 
-# ────────────────────────── input normalisation ──────────────────────────
+# ---- input normalisation -----------------------------------------------------------
 
 def _normalise_equations(equations):
     """Validate the {"terms", "mod", "rhs"} shape -> list of canonical dicts (raises on junk)
@@ -305,7 +311,7 @@ def _int_value(val, what):
     return int(val)
 
 
-# ────────────────────────── verification ──────────────────────────
+# ---- verification ------------------------------------------------------------------
 
 def check_solution(equations, assignment):
     """Substitute an assignment and report every equation that does not hold
@@ -357,7 +363,7 @@ def check_solution(equations, assignment):
     return (not failures), failures
 
 
-# ────────────────────────── the linear analysis over Z/m ──────────────────────────
+# ---- the linear analysis over Z/m --------------------------------------------------
 
 def _centre(value, mod):
     """Centred representative of `value` modulo `mod` (None mod means "already exact")"""
@@ -670,7 +676,7 @@ def _representative(residue, mod, bound):
                                                           mod, bound))
 
 
-# ────────────────────────── the lattice ──────────────────────────
+# ---- the lattice -------------------------------------------------------------------
 
 def _homogenise(eqs):
     """sum(terms) == rhs (mod m)  ->  sum(terms) - rhs * 1 == 0 (mod m)
@@ -913,7 +919,7 @@ def _probe_family(eqs, assignment, directions, columns, bnd):
     return None
 
 
-# ────────────────────────── the public entry points ──────────────────────────
+# ---- the public entry points -------------------------------------------------------
 
 def linearize(equations, bounds, extra_monomials=None, effort="normal"):
     """Build the linearisation lattice, reduce it, and read the small monomial values off
@@ -1280,6 +1286,151 @@ def _mono_value(mono, assignment):
     return val
 
 
+def _gcd(a: int, b: int) -> int:
+    return math.gcd(a, b)
+
+
+def _iroot(n: int, k: int):
+    return A.iroot(n, k)
+
+
+def separate_variables(monomial_values, variables=None, max_coeff: int = 2):
+    """Recover individual variables from known monomial values, by gcd and exact roots
+
+    The shape this exists for (a user's worked CTF example): a lattice hands back
+    `x*y^2` and `x^2*y` as its small quantities, and `gcd(x*y^2, x^2*y) = x*y` separates
+    them - `x = (x^2*y)/(x*y)`, `y = (x*y^2)/(x*y)`. More generally the input is a pool of
+    monomial values, and this function enriches it with the pairwise gcds (which are the
+    monomials with the minimum exponents, e.g. `gcd(x^2*y, x*y^2) = x*y`) and then looks
+    for an integer combination of the known exponent vectors that equals `k * e_v` for a
+    single variable `v`; the value of `v` is the exact `k`-th root of the corresponding
+    product.
+
+    Args:
+        monomial_values: {monomial: int}. Monomials in any form `parse_monomial`
+                         understands (("x","x","y"), "x^2*y", ...). Signs are handled by
+                         working with absolute values; a zero value makes its monomial
+                         useless and is reported in the note.
+        variables: optional list of names to separate; default = every variable that
+                   occurs in the monomials.
+        max_coeff: how far the search may go in combining known monomials (2 is enough
+                   for the canonical pairwise-gcd shapes; larger costs time only).
+    Returns:
+        `{"ok", "solution", "used", "note"}`; `solution` maps only the variables that
+        were separated and verified (`product of the monomials == the known value`).
+        A variable that cannot be isolated is listed in the note - never guessed.
+    """
+    pool = {}
+    for mono, value in (monomial_values or {}).items():
+        key = _as_monomial(mono)
+        try:
+            val = abs(int(value))
+        except (TypeError, ValueError):
+            continue
+        if val == 0 or val == 1:
+            continue
+        pool[key] = val
+    notes = []
+    if not pool:
+        return {"ok": False, "solution": None, "used": {},
+                "note": "no usable monomial values: need at least one positive integer"}
+    # Pairwise gcds: when two monomials use exactly the same variables, their gcd is the
+    # min-exponent monomial - that is what turns (x*y^2, x^2*y) into x*y. Monomials with
+    # different variable sets are skipped: their gcd is not a clean sub-monomial of both.
+    keys = list(pool)
+    for i in range(len(keys)):
+        for j in range(i + 1, len(keys)):
+            if set(keys[i]) != set(keys[j]):
+                continue
+            g = _gcd(pool[keys[i]], pool[keys[j]])
+            if g <= 1:
+                continue
+            cand = tuple(sorted(v for v in set(keys[i])
+                                for _ in range(min(keys[i].count(v), keys[j].count(v)))))
+            if not cand:
+                continue
+            if cand not in pool:
+                pool[cand] = g
+            elif pool[cand] != g:
+                notes.append(f"gcd({_show_mono(keys[i])}, {_show_mono(keys[j])}) = {g} "
+                             f"contradicts the given value {pool[cand]} for "
+                             f"{_show_mono(cand)}")
+    names = list(variables) if variables else sorted({v for mono in pool for v in mono})
+    exponents = {mono: {v: mono.count(v) for v in set(mono)} for mono in pool}
+    items = list(pool.items())
+    # Phase 1: isolate each variable on its own - an integer combination of the known
+    # exponent vectors must equal k * e_v for a single variable v (breadth is tiny: a
+    # handful of monomials, coefficients within +-max_coeff).
+    isolated = {}
+    for name in names:
+        for k in (1, 2, 3):
+            hit = None
+            for combo in _coeff_combos(len(items), max_coeff):
+                vec = {}
+                for coeff, (mono, _val) in zip(combo, items):
+                    for v, e in exponents[mono].items():
+                        vec[v] = vec.get(v, 0) + coeff * e
+                if vec.get(name) != k or any(v != name and e for v, e in vec.items()):
+                    continue
+                num, den = 1, 1
+                for coeff, (mono, val) in zip(combo, items):
+                    if coeff > 0:
+                        num *= val ** coeff
+                    elif coeff < 0:
+                        den *= val ** (-coeff)
+                if den == 0 or num % den:
+                    continue
+                root, exact = _iroot(num // den, k)
+                if exact and root > 0:
+                    hit = (root, vec)
+                    break
+            if hit is not None:
+                isolated[name] = hit
+                break
+        if name not in isolated:
+            notes.append(f"{name}: no integer combination of the known monomials "
+                         f"isolates it")
+    # Phase 2: verify the whole assignment against every monomial in the pool, once all
+    # the variables are in hand (checking earlier would reject valid values simply
+    # because their partners had not been separated yet).
+    solution = {name: root for name, (root, _vec) in isolated.items()}
+    used = {name: vec for name, (_root, vec) in isolated.items()}
+    for mono, val in items:
+        unknown = [v for v in set(mono) if v not in solution]
+        if unknown:
+            notes.append(f"{_show_mono(mono)}: not checked (no value for "
+                         f"{', '.join(sorted(unknown))})")
+            continue
+        prod = 1
+        for v in set(mono):
+            prod *= solution[v] ** mono.count(v)
+        if prod != val:
+            notes.append(f"{_show_mono(mono)} = {val}, but the separated values give "
+                         f"{prod}")
+    verified = not any("but the separated values give" in n for n in notes)
+    if solution and not verified:
+        solution = {}                      # nothing is reported that failed verification
+    if not solution:
+        return {"ok": False, "solution": None, "used": {},
+                "note": "; ".join(notes) or "could not separate any variable"}
+    if not notes:
+        notes.append(f"separated {len(solution)}/{len(names)} variable(s) from "
+                     f"{len(pool)} monomial value(s)")
+    return {"ok": len(solution) == len(names), "solution": solution, "used": used,
+            "note": "; ".join(notes)}
+
+
+def _coeff_combos(width: int, max_coeff: int):
+    """Integer coefficient tuples of the given width, small |coeff| first"""
+    if width == 0:
+        yield ()
+        return
+    order = [0] + [c for n in range(1, max_coeff + 1) for c in (n, -n)]
+    for head in order:
+        for tail in _coeff_combos(width - 1, max_coeff):
+            yield (head,) + tail
+
+
 def solve_linearized(equations, bounds, variables, verifier=None, effort="normal"):
     """`linearize` plus: derive the named variables, verify them, honour a caller verifier
 
@@ -1315,17 +1466,28 @@ def solve_linearized(equations, bounds, variables, verifier=None, effort="normal
                         % (", ".join(absent),))
         return res
     solution = {name: full[name] for name in req}
+    # The equations are re-checked here on the FULL assignment, so this function never claims
+    # ok on the strength of a subset: the requested variables may be fewer than the system's.
+    ok, failures = check_solution(equations, full)
+    if not ok:
+        res = dict(res)
+        res.update(ok=False, solution=None,
+                   note=(res["note"] + " | " if res["note"] else "")
+                        + "the candidate does not satisfy the equations (%s)"
+                        % _describe_failures(failures))
+        return res
+    note = res["note"]
     if verifier is not None:
         try:
             accepted = bool(verifier(dict(solution)))
         except Exception as exc:                       # a broken verifier is a rejection
             accepted = False
-            res["note"] = (res["note"] + " | " if res["note"] else "") + \
+            note = (note + " | " if note else "") + \
                 "the verifier raised %s: treated as a rejection" % type(exc).__name__
         if not accepted:
             res = dict(res)
             res.update(ok=False, solution=None,
-                       note=(res["note"] + " | " if res["note"] else "")
+                       note=(note + " | " if note else "")
                             + "the caller's verifier rejected the candidate (the equations "
                               "alone do hold, so the task's own check is what failed)")
             return res
@@ -1351,10 +1513,16 @@ def recover_from_products(products, bounds=None, modulus=None, effort="normal"):
         modulus: default modulus for every product (None or 0 = exact equality over Z).
         effort: as in `linearize`.
     Returns:
-        The dict shape of `linearize`. A single product such as x*y == c pins the monomial
-        but not x and y, so `monomial_values` comes back with ("x","y") and `solution` stays
-        None with the reason in the note - the caller decides whether to factor, to add an
-        equation or to use a different attack.
+        The dict shape of `linearize`. A single product such as x*y == c pins the monomial but
+        not x and y, so `monomial_values` comes back with ("x","y") and `solution` stays None
+        with the reason in the note - the caller decides whether to factor, to add an equation
+        or to use a different attack.
+    Bounds: an explicit `bounds` entry always wins. For an exact product the bound is derived
+    from the value itself (c*mono == rhs gives |mono| = |rhs/c|, rounded up - a fact, not an
+    assumption). For a MODULAR product the magnitude is genuinely unknown, so a bound is taken
+    from the single-variable bounds when the user gave them (|x*y| <= X*Y, a fact); failing
+    that the smallest representative of the residue is used as the bound and the note says so,
+    because "the residue is the value" is an assumption about the task, not a proof.
     """
     items = []
     if products is None:
@@ -1366,8 +1534,7 @@ def recover_from_products(products, bounds=None, modulus=None, effort="normal"):
             if not isinstance(item, (list, tuple)) or len(item) != 2:
                 raise TypeError("each product must be a (monomial, value) pair")
             items.append((item[0], item[1]))
-    eqs = []
-    auto = {}
+    parsed = []
     for key, val in items:
         mono = _as_monomial(key)
         mod = modulus or 0
@@ -1386,27 +1553,51 @@ def recover_from_products(products, bounds=None, modulus=None, effort="normal"):
         rhs = _int_value(rhs, "product value")
         if not coeff:
             raise ValueError("product coefficient 0 makes the equation empty")
-        eqs.append({"terms": {mono: coeff}, "mod": mod, "rhs": rhs})
-        if mod:
-            small = min(rhs % mod, mod - (rhs % mod))
-            auto[mono] = max(1, small)
-        else:
-            auto[mono] = max(1, (abs(rhs) + abs(coeff) - 1) // abs(coeff))
-    if not eqs:
-        res = linearize([], {}, effort=effort)
+        parsed.append((mono, coeff, rhs, mod))
+    if not parsed:
+        res = dict(linearize([], {}, effort=effort))
         res["note"] = "no products given: nothing to recover"
         return res
     user = _normalise_bounds(bounds)
+    var_bounds = {mono[0]: x for mono, x in user.items() if len(mono) == 1}
+    auto = {}
+    assumed = []
+    for mono, coeff, rhs, mod in parsed:
+        if mono in user:
+            continue
+        if not mod:
+            auto[mono] = max(1, (abs(rhs) + abs(coeff) - 1) // abs(coeff))
+            continue
+        derived = _derive_bound(mono, var_bounds)
+        if derived is not None:
+            auto[mono] = max(1, derived)
+            continue
+        residue = rhs % mod
+        inv = A.modinv(coeff % mod, mod)
+        if inv is not None:
+            residue = rhs * inv % mod
+        auto[mono] = max(1, min(residue, mod - residue))
+        assumed.append(mono)
+    eqs = [{"terms": {mono: coeff}, "mod": mod, "rhs": rhs}
+           for mono, coeff, rhs, mod in parsed]
     merged = dict(auto)
     merged.update(user)
     res = linearize(eqs, merged, extra_monomials=list(user), effort=effort)
-    if not res["ok"] and res["solution"] is None:
+    if res["solution"] is None:
         res = dict(res)
-        given = ", ".join("%s = %s" % (_show_mono(_as_monomial(k)), v)
-                          for k, v in items)
-        note = res["note"]
-        res["note"] = (note + " | " if note else "") + \
-            "products given: %s; a single product of two secrets does not separate them - " \
-            "factor the product, add one more relation, or bound the single variables in " \
-            "`bounds` so they enter as shifts" % given
+        given = ", ".join("%s = %s" % (_show_mono(mono), rhs)
+                          for mono, _coeff, rhs, _mod in parsed)
+        if len(parsed) == 1:
+            advice = ("one product of two secrets does not separate them - factor the "
+                      "product, add one more relation, or bound the single variables in "
+                      "`bounds` so they enter as shifts")
+        else:
+            advice = ("one more relation (or a bound on the single variables, which then "
+                      "enter as shifts) is what separates the factors")
+        bits = [res["note"], "products given: %s; %s" % (given, advice)]
+        if assumed:
+            bits.append("the magnitude of %s was ASSUMED to be the small representative of "
+                        "the residue; pass `bounds` if it can be larger"
+                        % (", ".join(_show_mono(m) for m in assumed),))
+        res["note"] = " | ".join(b for b in bits if b)
     return res

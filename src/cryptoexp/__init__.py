@@ -144,6 +144,10 @@ from .utils.forensics import (
     batch_gcd, common_factor_pairs, parse_der_signature, parse_jwt,
     audit_rsa_key, detect_weak_prng, scan_structured_gcd,
 )
+from .utils.linearize import (
+    linearize, solve_linearized, recover_from_products, separate_variables,
+    monomials_of, parse_monomial, check_solution,
+)
 from . import hypothesis
 from .hypothesis import (
     evaluate as evaluate_hypotheses, list_hypotheses, register_hypothesis,
@@ -247,6 +251,9 @@ _CANDIDATE_EXPORTS = [
     # real-world forensics (beyond CTF)
     "batch_gcd", "common_factor_pairs", "parse_der_signature", "parse_jwt",
     "audit_rsa_key", "detect_weak_prng", "scan_structured_gcd",
+    # small-root helpers: linearization lattice first, then the polynomial route
+    "linearize", "solve_linearized", "recover_from_products", "separate_variables",
+    "monomials_of", "parse_monomial",
     # RSA attacks (extra) / keys
     "franklin_reiter", "hastad_padded", "stereotyped_message",
     "parity_oracle_attack", "lsb_oracle_attack", "rsa_recover_d_from_factors",
