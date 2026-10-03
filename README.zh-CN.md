@@ -84,7 +84,7 @@ pip install cryptoexp          # 等有稳定版之后（见下面的 alpha 说�
 pipx install cryptoexp         # 只要命令行工具的话
 ```
 
-首个版本是**预发布版**（`0.1.0a1`），所以 pip 需要加 `--pre`：
+目前所有版本都是**预发布版**（`0.1.0aN`），所以 pip 需要加 `--pre`：
 
 ```bash
 pip install --pre cryptoexp

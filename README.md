@@ -101,7 +101,7 @@ pip install cryptoexp          # once a stable release exists (see the alpha not
 pipx install cryptoexp         # if you only want the CLI
 ```
 
-The first release is a **pre-release** (`0.1.0a1`), so pip needs `--pre`:
+Every release so far is a **pre-release** (`0.1.0aN`), so pip needs `--pre`:
 
 ```bash
 pip install --pre cryptoexp
