@@ -48,6 +48,17 @@ def analyze_encoding(ctx: dict, max_blobs: int = 20, effort: str = "normal") -> 
             out["blobs"].append(entry)
             continue
 
+        # Gate: a source file is the analyst's own tooling, not ciphertext. Probing
+        # `import gmpy2` with caesar/xor scored 77 and landed in the report as a
+        # "classical cipher candidate" (reported 2026-10-03).
+        source_names = {p.get("name") for p in ctx.get("py", [])}
+        if str(blob.get("source")) in source_names or \
+                str(blob.get("source", "")).endswith((".py", ".sage", ".sh")):
+            entry["note"] = ("source-code file, not ciphertext: no decode/xor probes "
+                             "(the code itself is the analyst's tooling)")
+            out["blobs"].append(entry)
+            continue
+
         # 1) Multi-layer decode chain
         chain = E.decode_chain(text, max_layers=3)
         entry["chain"] = [{k: c[k] for k in ("steps", "score", "confidence", "flags")}

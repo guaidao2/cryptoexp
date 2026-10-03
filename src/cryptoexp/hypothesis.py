@@ -156,6 +156,15 @@ _rsa("rsa_wiener", "d too small → a convergent of the continued fraction of e/
      lambda d: _has(d, "n", "e"),
      lambda d: R.wiener_attack(d["e"], d["n"], d.get("c")))
 
+_rsa("rsa_common_private_exponent",
+     "Wiener failed on one modulus → two moduli may share the same small d "
+     "(small-denominator rational approximation)",
+     ("n×2", "e×2"),
+     lambda d: len([v for v in d["n_list"] if v]) >= 2 and d.get("e"),
+     lambda d: R.common_private_exponent_attack(
+         list(zip([d["e"]] * len(d["n_list"]), d["n_list"])))
+     if d.get("e") else {"ok": False, "note": "missing e"})
+
 _rsa("rsa_fermat", "p and q close together → Fermat factorisation", ("n",),
      lambda d: _has(d, "n"),
      lambda d: R.fermat_attack(d["n"], d["e"] or 65537, d.get("c"), max_iter=200000),

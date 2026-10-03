@@ -67,6 +67,11 @@ def analyze_classical(ctx: dict) -> dict:
                         "attack": "morse", "data": dec.encode(),
                         "confidence": E.confidence_of(sc, bool(E.flag_candidates(dec.encode()))),
                         "detail": f"morse decode, score {sc:.1f}"})
+                # Keep the probe even though the remaining classical probes make no
+                # sense for Morse: the solve generator reads probes[0] to inline the
+                # ciphertext, and skipping the append here left it empty, so the Morse
+                # template fell back to a hardcoded demo string and printed '??'.
+                out["probes"].append(probe)
                 continue
 
         # Caesar

@@ -279,12 +279,21 @@ class TestSolverGeneration(unittest.TestCase):
             "classical_caesar.txt": "flag{caesar_is_classic}",
             "crc_preimage.txt": "flag{lin4}",
             "lfsr_predict.txt": "flag{lfsr_taps}",
+            # Added after the 2026-10-03 pipeline audit. Each of these four was broken in
+            # a different way and none of them was in this list, so the suite stayed
+            # green while the generated scripts printed a truncated flag, a hardcoded
+            # demo string, the wrong cipher family, or nothing at all.
+            "classical_morse.txt": "THEFLAGISMORSECODED",
+            "classical_vigenere.txt": "flag{vigenere_key_recovered}",
+            "encoding_chain.txt": "flag{multi_layer_encoding_chain}",
+            "knapsack.txt": "selected indices",
         }
         for name, want in cases.items():
             results = _analyze(name)
             path = generate(results, out_dir=out_dir)
             proc = subprocess.run([sys.executable, path], capture_output=True,
-                                  text=True, timeout=180)
+                                  text=True, encoding="utf-8", errors="replace",
+                                  timeout=300)
             self.assertEqual(proc.returncode, 0,
                              f"{name}: {os.path.basename(path)} exited "
                              f"{proc.returncode}\n{proc.stderr[-400:]}")

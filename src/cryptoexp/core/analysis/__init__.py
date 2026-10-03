@@ -114,7 +114,17 @@ def _analyze_scoped(target: str, skip_encoding: bool, effort: str,
 
     results["encoding"] = {"blobs": [], "candidates": [], "notes": ["skipped"]} \
         if skip_encoding else analyze_encoding(ctx, effort=effort)
-    results["classical"] = analyze_classical(ctx)
+    if ctx.get("source_like"):
+        # Score-based probes on code are pure noise (`import gmpy2` scored as a caesar
+        # candidate). The encodings inside a script are still analysed by the encoding
+        # analyzer; only the "this looks like English after a shift" family is skipped.
+        results["classical"] = {
+            "probes": [], "candidates": [], "vulns": [],
+            "note": "target looks like source code: classical cipher scoring skipped "
+                    "(code text scores as English by accident)",
+        }
+    else:
+        results["classical"] = analyze_classical(ctx)
     results["rsa"] = analyze_rsa(ctx)
     results["symmetric"] = analyze_symmetric(ctx)
     results["numbertheory"] = analyze_numbertheory(ctx)

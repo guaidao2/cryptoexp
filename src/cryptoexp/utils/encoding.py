@@ -109,10 +109,12 @@ DEFAULT_FLAG_PREFIXES = (
 _BODY = (rb'\{(?=[^}\x00-\x1f]{0,120}\})(?=[^}\x00-\x1f]*[A-Za-z0-9])'
          rb'[^}\x00-\x1f]{2,120}\}')
 _STRICT_FLAG_PAT = re.compile(
-    rb'(?i)(?:flag|ctf|picoctf|htb|nite|sekai|corctf|idek|ductf|actf|ictf|lactf'
-    rb'|buckeye|justctf|uiuctf|dice|grey|hxp|asis|0ctf|rwctf|hitcon|tjctf'
-    rb'|angstromctf|shellctf|wctf|csaw|rialto|vsctf|maple|amuctf|sctf|n1ctf'
-    rb'|flag_[a-z0-9]+|ctf_[a-z0-9]+)' + _BODY)
+    rb'(?i)(?:' + b'|'.join(re.escape(p.encode()) for p in DEFAULT_FLAG_PREFIXES)
+    + rb'|flag_[a-z0-9]+|ctf_[a-z0-9]+)' + _BODY)
+# Built from DEFAULT_FLAG_PREFIXES above on purpose. The alternation used to be typed
+# out a second time, so editing the tuple silently changed nothing for the default path
+# (the literal pattern was what actually ran) - a maintenance trap, not a bug with a
+# symptom. The two `prefix_xxx` variants stay explicit: they are not in the tuple.
 # Loose flag: any token{...} — a "candidate" lead only, never a confirmation basis.
 # The body must contain at least one alphanumeric character: `DH{...}` in a statement
 # describing the format is a placeholder, not a flag, and treating it as one made the
@@ -178,8 +180,14 @@ def set_flag_prefixes(prefixes=None, pattern=None, merge=False):
                                          else pattern)
     if prefixes is not None:
         items = list(prefixes)
-        if merge and _CONFIGURED_PREFIXES:
-            items = list(_CONFIGURED_PREFIXES) + items
+        if merge:
+            # Merge with the prefixes actually in force (explicit config, env var or the
+            # built-ins). The old code merged only with the explicit config, which is
+            # None in a fresh process - so `set_flag_prefixes(["DH"], merge=True)` left
+            # the list as ("DH",) and dropped `flag`, contradicting the README's
+            # "DH plus the built-ins" and quietly breaking flag{...} detection.
+            current = list(get_flag_prefixes())
+            items = current + [p for p in items if p not in current]
         _CONFIGURED_PREFIXES = items
     return previous
 

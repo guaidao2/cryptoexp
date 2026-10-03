@@ -232,6 +232,147 @@ def batch_gcd(moduli, progress=None):
     return out
 
 
+def scan_structured_gcd(moduli, offsets=(0, -1, 1), max_moduli: int = 40,
+                        min_factor_bits: int = 32, progress=None):
+    """Scan gcd combinations of N+offset across a set of moduli
+
+    The everyday audit move that everyone hand-writes: for a list of RSA moduli, walk
+    every pair and every offset combination and ask whether `gcd(N_i + o_i, N_j + o_j)`
+    is non-trivial. `offsets=(-1, +1)` catches shared structure in `p-1` / `p+1` (the
+    "same prime family" and twin-prime-ish mistakes); the default also includes 0, which
+    is the plain shared-prime case.
+
+    Two kinds of result, kept apart on purpose because only one of them factors a
+    modulus:
+      * "shared_factor" - both offsets are 0 and the gcd divides both N_i and N_j, so
+        each modulus can be factored with it (`p = factor`, `q = N // factor`).
+      * "structured" - at least one offset is non-zero, so the gcd divides the *shifted*
+        value (N_i - 1 etc.), not N_i itself. That is a lead about p-1/p+1, never a
+        factorisation; reporting it as one would be a false positive.
+
+    Every reported value is re-checked by division before it is emitted, and a gcd equal
+    to one of the moduli is reported as "divides" (N_i | N_j) rather than as a factor.
+
+    Parameters: `offsets` iterable of ints (0 means the modulus itself); `max_moduli`
+    caps the O(n^2 * |offsets|^2) work. Returns a JSON-friendly dict:
+        {"pairs": [{"i", "j", "offset_i", "offset_j", "factor", "kind", ...}],
+         "checked", "offsets", "duplicates", "rejected", "note"}
+        plus, for "shared_factor" findings, "p_i"/"q_i"/"p_j"/"q_j".
+    Returns: the dict above; a caller can read it straight into a report.
+
+    The library-level counterpart for the same question over a large fleet is
+    `batch_gcd` (product tree, one pass) - use that one when there are hundreds of
+    moduli, and this one when the offset combinations matter.
+    """
+    raw = list(moduli)
+    ns, skip = [], []
+    for idx, value in enumerate(raw):
+        if isinstance(value, (bytes, bytearray)):
+            value = R.bytes_to_long(value)
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            skip.append(idx)
+            continue
+        if n <= 1:
+            skip.append(idx)
+            continue
+        ns.append((idx, n))
+    offsets = sorted({int(o) for o in offsets})
+    out = {"pairs": [], "checked": len(ns), "offsets": offsets, "duplicates": {},
+           "rejected": [], "trivial": 0, "skipped": skip, "note": ""}
+    if len(ns) < 2:
+        out["note"] = "fewer than two usable moduli: nothing to compare"
+        return out
+    if len(ns) > max_moduli:
+        out["note"] = (f"{len(ns)} moduli exceed max_moduli={max_moduli}; "
+                       f"truncated to the first {max_moduli}")
+        ns = ns[:max_moduli]
+
+    # Identical moduli are a duplicate-key finding, not a shared factor (gcd(n, n) = n)
+    by_value = {}
+    for idx, n in ns:
+        by_value.setdefault(n, []).append(idx)
+    out["duplicates"] = {n: sorted(v) for n, v in by_value.items() if len(v) > 1}
+
+    for a in range(len(ns)):
+        for b in range(a + 1, len(ns)):
+            ia, na = ns[a]
+            ib, nb = ns[b]
+            if na == nb:
+                # Identical moduli: already in `duplicates`, and gcd(N+oa, N+ob) is a
+                # trivially small number (2 for the -1/+1 pair), pure noise.
+                continue
+            for oa in offsets:
+                va = na + oa
+                if va <= 1:
+                    continue
+                for ob in offsets:
+                    vb = nb + ob
+                    if vb <= 1:
+                        continue
+                    if va == vb:
+                        # Same shifted value on both sides (e.g. N_i+1 == N_j-1): no
+                        # information about a factor, but state it rather than dropping
+                        # it silently.
+                        out["rejected"].append({"i": ia, "j": ib, "offset_i": oa,
+                                                "offset_j": ob,
+                                                "reason": "shifted values are identical"})
+                        continue
+                    g = A.gcd(va, vb)
+                    if g <= 1:
+                        continue
+                    if oa == 0 and ob == 0:
+                        if g in (na, nb):
+                            # N_i | N_j: a relation worth stating, but it does not
+                            # factor anything, and calling it a factor would mislead.
+                            out["pairs"].append({"i": ia, "j": ib, "offset_i": 0,
+                                                 "offset_j": 0, "factor": g,
+                                                 "kind": "divides",
+                                                 "detail": f"N_{ia} divides N_{ib}"})
+                            continue
+                        # Confirmed by division before reporting (same policy as batch_gcd)
+                        if na % g or nb % g:
+                            out["rejected"].append({"i": ia, "j": ib, "factor": g})
+                            continue
+                        out["pairs"].append({
+                            "i": ia, "j": ib, "offset_i": 0, "offset_j": 0, "factor": g,
+                            "kind": "shared_factor",
+                            "p_i": g, "q_i": na // g, "p_j": g, "q_j": nb // g,
+                            "detail": f"shared prime factor of N_{ia} and N_{ib}"})
+                    else:
+                        if va % g or vb % g:
+                            out["rejected"].append({"i": ia, "j": ib, "factor": g,
+                                                    "offset_i": oa, "offset_j": ob})
+                            continue
+                        # A small shared factor in a shifted value is almost always an
+                        # artefact (odd/even, multiples of 3): counting it keeps the
+                        # scan honest without burying the real finding in noise.
+                        if g.bit_length() < min_factor_bits:
+                            out["trivial"] += 1
+                            continue
+                        out["pairs"].append({
+                            "i": ia, "j": ib, "offset_i": oa, "offset_j": ob, "factor": g,
+                            "kind": "structured",
+                            "detail": f"gcd(N_{ia}{oa:+d}, N_{ib}{ob:+d}) shares {g}; a "
+                                      f"structural lead (p-1/p+1 style), not a factor of "
+                                      f"either modulus"})
+    kinds = {p["kind"] for p in out["pairs"]}
+    if out["pairs"]:
+        out["note"] = ("%d finding(s) across %d moduli (%s)%s"
+                       % (len(out["pairs"]), len(ns), ", ".join(sorted(kinds)),
+                          "; %d duplicate modulus(es)" % len(out["duplicates"])
+                          if out["duplicates"] else ""))
+    else:
+        out["note"] = "no structured gcd relation among %d moduli" % len(ns)
+    if out["trivial"]:
+        out["note"] += ("; %d gcd(s) below %d bits ignored as artefacts"
+                        % (out["trivial"], min_factor_bits))
+    if progress:
+        progress("scan_structured_gcd: %d pair(s)" % len(out["pairs"]))
+    return out
+
+
 def _product_tree(values):
     """level[0] = the root product of all values, level[-1] = the values themselves
 

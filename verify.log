@@ -1,6 +1,6 @@
 ﻿python : ................................D:\编程\cryptokit\tests\test_challenges.py:172: ResourceWarning: unclosed file <
 _io.TextIOWrapper name='D:\\编程\\cryptokit\\challenges\\knapsack.txt' mode='r' encoding='utf-8'>
-所在位置 行:1 字符: 324
+所在位置 行:1 字符: 414
 + ... = Measure-Command { python -m unittest discover -s tests 2>&1 | Out-F ...
 +                         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     + CategoryInfo          : NotSpecified: (..................coding='utf-8'>:String) [], RemoteException
@@ -28,9 +28,17 @@ D:\编程\cryptokit\tests\test_challenges.py:255: ResourceWarning: unclosed file
 \\.tmp\\solves\\solve_lcg_lcg.txt.py' mode='r' encoding='utf-8'>
   src = open(path, encoding="utf-8").read()
 ResourceWarning: Enable tracemalloc to get the object allocation traceback
-.......................................................................................................................
-............
+.......D:\编程\cryptokit\tests\test_feedback_regressions.py:56: ResourceWarning: unclosed file <_io.TextIOWrapper name='D
+:\\编程\\cryptokit\\challenges\\rsa_wiener.txt' mode='r' encoding='utf-8'>
+  encoding="utf-8").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+............................................................................................D:\编程\cryptokit\tests\test_
+pipeline_regressions.py:132: ResourceWarning: unclosed file <_io.TextIOWrapper name='D:\\编程\\cryptokit\\src\\cryptoexp\
+\utils\\encoding.py' mode='r' encoding='utf-8'>
+  encoding="utf-8").read()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+........................................................
 ----------------------------------------------------------------------
-Ran 172 tests in 167.938s
+Ran 196 tests in 353.995s
 
 OK

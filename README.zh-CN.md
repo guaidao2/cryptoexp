@@ -214,8 +214,10 @@ Java/glibc PRNG 恢复、RSA 攻击封装、密钥解析与签名原语。
 能编译**并真的跑到 flag**，JSON 契约必须成立。
 `tests/test_forensics.py` 覆盖评估层（批量 GCD、密钥审计、JWT/DER 解析、弱 PRNG 识别），
 材料是构造出来的真实形态数据。
+`tests/test_audit_regressions.py` 把两轮独立审计找出的每个缺陷都钉住，防止错误公式和
+"看着对其实误导"的 docstring 复现。
 
-目前合计：**153 个用例全绿**（`python -m unittest discover -s tests`）。
+目前合计：**172 个用例全绿**（`python -m unittest discover -s tests`）。
 
 ---
 

@@ -282,7 +282,11 @@ def json_summary(results: dict, verification: dict = None) -> dict:
 
 
 def print_json_summary(results: dict, verification: dict = None) -> str:
-    return json.dumps(json_summary(results, verification), ensure_ascii=False,
+    # ensure_ascii=True keeps the payload pure ASCII. Candidates can hold arbitrary
+    # bytes; decoded with errors="replace" they become U+FFFD, and printing that on a
+    # non-UTF-8 console (a Windows GBK shell, which the reporter used) raised
+    # UnicodeEncodeError and produced *no* JSON at all. Escaped now, not lost.
+    return json.dumps(json_summary(results, verification), ensure_ascii=True,
                       indent=2, default=str)
 
 

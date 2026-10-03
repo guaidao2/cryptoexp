@@ -10,6 +10,7 @@ instead of pretending to succeed.
 
 from fractions import Fraction
 import math
+import sys
 
 from .algebra import isqrt, perfect_square, modinv, gcd
 
@@ -37,20 +38,41 @@ def _round_half(x: Fraction) -> int:
     return math.floor(x + Fraction(1, 2))
 
 
-def lll(basis, delta=Fraction(3, 4), max_dim: int = 12):
+class LatticeDimensionError(ValueError):
+    """Raised (only when asked) because a basis is too large for this LLL"""
+
+
+def lll(basis, delta=Fraction(3, 4), max_dim: int = 12, strict: bool = False):
     """LLL basis reduction — input is a list of integer row vectors,
-    returns the reduced integer basis
+    returns the reduced integer basis, or None when it is out of scale
 
     The implementation is the textbook "recompute Gram-Schmidt at every step"
     version: slower, but free of the hard-to-find precision/sign bugs that live
-    in incremental updates — good enough at CTF scale.
+    in incremental updates — good enough at CTF scale. Measured on this machine:
+    dim 12x15 takes seconds, 20x22 tens of seconds, 30x30 well over ten minutes,
+    which is why `max_dim` exists.
+
+    `None` has two meanings and used to be silent, which cost a user real time
+    ("I thought my lattice construction was wrong, not that LLL had bailed out"):
+      * the basis exceeds `max_dim` (square dimension or row count), or
+      * the reduction hit its internal step guard.
+    Both now say so on stderr with the actual numbers, and `strict=True` raises
+    `LatticeDimensionError` instead. Callers that prefer to handle it themselves
+    keep getting None (every internal caller checks for it), so pass strict=True
+    when you want the failure to be impossible to overlook.
     """
     if not basis:
         return []
     n = len(basis)
     dim = len(basis[0])
     if n > max_dim or dim > max_dim:
-        return None  # out of scale: do not force it
+        # out of scale: do not force it - but never do it silently
+        message = (f"lll: basis is {n}x{dim}, over max_dim={max_dim} "
+                   f"(raise max_dim, or shrink the lattice)")
+        if strict:
+            raise LatticeDimensionError(message)
+        print(f"[!] {message}", file=sys.stderr)
+        return None
     B = [[int(x) for x in row] for row in basis]
     ortho, mu = _gram_schmidt(B)
     k = 1
@@ -58,6 +80,11 @@ def lll(basis, delta=Fraction(3, 4), max_dim: int = 12):
     while k < n:
         guard += 1
         if guard > 4000:
+            message = (f"lll: internal step guard hit after {guard} iterations on a "
+                       f"{n}x{dim} basis - returning None rather than a half-reduced one")
+            if strict:
+                raise LatticeDimensionError(message)
+            print(f"[!] {message}", file=sys.stderr)
             return None  # give up rather than return a half-finished basis
         for j in range(k - 1, -1, -1):
             if abs(mu[k][j]) > Fraction(1, 2):
@@ -489,9 +516,20 @@ def mitm_subset_sum(weights, target, max_n: int = 36):
     return sorted(picks)
 
 
-def approx_gcd(values):
-    """Approximate gcd of a difference sequence — for LCG modulus recovery
-    (gcd of several differences, then try small multiples)"""
+def lcg_approx_gcd(values):
+    """gcd of a *sequence* of integers, for LCG modulus recovery
+
+    Scope, stated first because the old name misled a user who expected the
+    two-integer approximate-common-divisor problem: feed it the successive differences
+    of an LCG's outputs (t_i = x_{i+1} - x_i, or second differences) and it returns
+    their gcd, i.e. the modulus up to a small multiplier.
+
+    It does NOT take two large numbers and look for a shared approximate factor. For
+    that, use `forensics.common_factor_pairs([N1, N2])` (two moduli in an RSA set) or
+    `batch_gcd` for a whole list.
+
+    Returns: int (>1) or None when the gcd is trivial.
+    """
     g = 0
     for v in values:
         g = gcd(g, abs(int(v)))
@@ -500,3 +538,12 @@ def approx_gcd(values):
     if g <= 1:
         return None
     return g
+
+
+def approx_gcd(values):
+    """Deprecated alias of `lcg_approx_gcd` — see that docstring for the scope
+
+    Kept so existing scripts keep working; the name was ambiguous (it reads like "the
+    approximate gcd of two numbers" but it consumes a sequence).
+    """
+    return lcg_approx_gcd(values)

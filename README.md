@@ -236,12 +236,15 @@ the MT19937 clone. `tests/test_toolkit.py` covers the mechanical layer added in 
 modular symbols and non-coprime CRT, polynomial/GF(2) arithmetic, CRC forgery,
 LFSR tap recovery, length extension, RC4/ChaCha20/AES-CTR vectors, Java/glibc PRNG
 recovery, RSA attack wrappers, key parsing and the signature primitives.
-`tests/test_challenges.py` is end-to-end: 19 samples must yield their flags, generated
-solve scripts must compile **and run to the flag**, and the JSON contract must hold.
+`tests/test_challenges.py` is end-to-end: 19 samples must yield their verdicts (16 assert
+an exact flag, 3 assert a structural outcome), generated solve scripts must compile **and
+run to the flag**, and the JSON contract must hold.
 `tests/test_forensics.py` covers the assessment layer (batch GCD, key audit, JWT/DER
 parsing, weak-PRNG identification) on constructed real-world material.
+`tests/test_audit_regressions.py` pins every defect two independent audits found, so the
+wrong formulas and silently-misleading docstrings cannot come back.
 
-Current total: **153 tests, all green** (`python -m unittest discover -s tests`).
+Current total: **172 tests, all green** (`python -m unittest discover -s tests`).
 
 ---
 

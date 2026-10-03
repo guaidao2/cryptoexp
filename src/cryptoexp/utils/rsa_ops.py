@@ -326,6 +326,103 @@ def wiener_attack(e, n, c=None):
     return out
 
 
+def common_private_exponent_attack(pairs, max_candidates: int = 400):
+    """Several moduli sharing one small private exponent d — the Wiener follow-up
+
+    When the same d is used across moduli, `e_i*d - k_i*phi_i = 1` gives
+    `k_i/d ~ e_i/n_i`, so d is a denominator of a continued-fraction convergent of
+    `e_i/n_i` for **every** modulus. Wiener on one modulus needs d < n^0.25/3; the
+    shared d survives well past that, because a candidate d is only accepted when it
+    explains *all* the moduli at once (k_i = round(e_i*d/n_i) must be exact and the
+    resulting phi_i must factor n_i). That is the "small-denominator rational
+    approximation across two moduli" lead: run it when `wiener_attack` comes back empty
+    and more than one (e, n) pair is on the table.
+
+    pairs: [(e_i, n_i), ...] or [(e_i, n_i, c_i), ...] — ciphertexts are optional.
+    Returns: the standard result dict, with one deviation for this multi-modulus
+             attack: result["factors"] is a **list** of (p_i, q_i) in input order
+             instead of the usual single tuple, result["d"] is the shared exponent, and
+             result["plaintexts"] carries the decrypted messages when ciphertexts were
+             supplied. Every factor pair is checked by multiplication before it is
+             reported.
+
+    MEASURED RANGE, stated because it is narrower than the name suggests: this
+    convergent-based version stays inside the per-modulus continued-fraction reach, so
+    with three 512-bit moduli it succeeds at d = 100/120/126 bits - where single-modulus
+    `wiener_attack` *also* already succeeds - and fails at d = 130/140 bits, exactly
+    where Wiener fails. It is a cheap extra lead, not a widened bound. Recovering a
+    genuinely larger shared d needs the simultaneous-Diophantine-approximation lattice
+    (the `common_d` module), which is the fallback to use when this returns ok=False.
+    """
+    items = []
+    for entry in pairs:
+        if len(entry) == 3:
+            items.append((int(entry[0]), int(entry[1]), int(entry[2])))
+        else:
+            e_i, n_i = entry
+            items.append((int(e_i), int(n_i), None))
+    if len(items) < 2:
+        return _res(False, note="needs at least two (e, n) pairs; with one modulus use "
+                               "wiener_attack or fermat_attack")
+    if any(e_i <= 0 or n_i <= 1 for e_i, n_i, _ in items):
+        return _res(False, note="invalid (e, n) pair")
+
+    # Candidate shared exponents: the convergent denominators of every e_i/n_i
+    candidates = set()
+    for e_i, n_i, _ in items:
+        for _k, d in A.convergents(A.continued_fraction(e_i, n_i)):
+            if 0 < d:
+                candidates.add(d)
+    candidates = sorted(candidates)[:max_candidates]
+    if not candidates:
+        return _res(False, note="no continued-fraction denominators to test")
+
+    for d in candidates:
+        factors = []
+        phis = []
+        ok = True
+        for e_i, n_i, _c in items:
+            k_est = (e_i * d) // n_i
+            found = None
+            for k in (k_est - 1, k_est, k_est + 1, k_est + 2):
+                if k <= 0 or (e_i * d - 1) % k:
+                    continue
+                phi = (e_i * d - 1) // k
+                if not (1 < phi < n_i):
+                    continue
+                pair = factor_from_phi(n_i, phi)
+                if pair and pair[0] * pair[1] == n_i:
+                    found = (pair, phi)
+                    break
+            if found is None:
+                ok = False
+                break
+            factors.append(found[0])
+            phis.append(found[1])
+        if not ok:
+            continue
+        # Independent verification: every modulus must satisfy e_i*d ≡ 1 mod phi_i
+        if any((e_i * d) % phis[idx] != 1 for idx, (e_i, _n, _c) in enumerate(items)):
+            continue
+        out = _res(True, d=d, factors=factors,
+                   detail=f"shared private exponent d recovered ({d.bit_length()} bits) "
+                          f"from {len(items)} moduli; single-modulus Wiener did not "
+                          f"apply")
+        if all(c is not None for _e, _n, c in items):
+            msgs = []
+            for idx, (e_i, n_i, c_i) in enumerate(items):
+                p_i, q_i = factors[idx]
+                m = decrypt_with_factors(n_i, e_i, c_i, p_i, q_i)
+                msgs.append(m.get("plaintext"))
+            out["plaintexts"] = msgs
+            out["plaintext"] = next((m for m in msgs if m), None)
+        return out
+    return _res(False, note=f"no shared d among {len(candidates)} convergent "
+                           f"denominator candidate(s); the exponent is probably not "
+                           f"common to these moduli (or it exceeds the approximation "
+                           f"range)")
+
+
 def fermat_attack(n, e=65537, c=None, max_iter: int = 1000000):
     """p and q close → Fermat factorisation
     Returns: the standard result dict - {"ok", "plaintext", "detail", "factors",
@@ -467,6 +564,14 @@ def auto_attack(n, e=65537, c=None, pairs=None, p=None, q=None, d=None,
     r = wiener_attack(e, n, c)
     if r["ok"]:
         return r
+    # Wiener failed: if more than one modulus is on the table, the small private
+    # exponent may be *shared* rather than small per modulus - the follow-up lead a user
+    # asked for. Cheap (continued fractions only), so it goes right after Wiener.
+    if pairs and len(pairs) >= 2:
+        r = common_private_exponent_attack(list(pairs))
+        if r["ok"]:
+            r["detail"] = "auto_attack: " + r.get("detail", "")
+            return r
     r = fermat_attack(n, e, c)
     if r["ok"]:
         return r

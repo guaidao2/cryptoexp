@@ -155,7 +155,36 @@ def build_context(target: str) -> dict:
         if dec and len(dec) >= 8:
             ctx["data"].append({"source": b["source"], "data": dec,
                                 "kind": b["kinds"][0], "blob": b["text"][:64]})
+
+    # Is this target source code (the analyst's own tooling) rather than ciphertext?
+    # A `.py` file in the context, or inline text that reads like one, makes the
+    # score-based probes (classical ciphers, single-byte xor) meaningless: they happily
+    # reported "caesar shift=6 score 77.46" for a line like `import gmpy2` (reported by
+    # a user analysing their own solve script, 2026-10-03).
+    ctx["source_like"] = bool(ctx["py"]) or looks_like_source(ctx.get("raw_text") or "")
     return ctx
+
+
+# Lines that only appear in source code, never in a challenge ciphertext.
+_SOURCE_LINE_RE = re.compile(
+    r'^\s*(?:import\s+\S|from\s+\S+\s+import\s|def\s+\w+\s*\(|class\s+\w+|'
+    r'@\w+|if\s+__name__\s*==|print\s*\(|#!/usr/bin/env)')
+
+
+def looks_like_source(text: str) -> bool:
+    """True when text is source code rather than challenge material
+
+    Deliberately structural (imports/defs/comments/shebang), not statistical: a
+    challenge that merely contains the word "def" must not be skipped.
+    """
+    if not text:
+        return False
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 3:
+        return False
+    hits = sum(1 for ln in lines if _SOURCE_LINE_RE.match(ln))
+    comments = sum(1 for ln in lines if ln.lstrip().startswith("#"))
+    return hits >= 3 or (hits + comments) >= len(lines) * 0.4
 
 
 def _extract_blobs(text: str, source: str):

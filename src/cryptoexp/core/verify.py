@@ -71,6 +71,17 @@ def verify_candidates(results: dict, candidates=None) -> dict:
     params = (results.get("rsa") or {}).get("params") or {}
     n, e, c = params.get("n"), params.get("e"), params.get("c")
 
+    # The statement is not evidence about itself. A challenge that explains the flag
+    # format ("The flag format is flag{EXAMPLE_FLAG_NOT_THE_ANSWER}") used to be
+    # reported as `confirmed`, because the classical analyzer probes the statement text
+    # and any strict flag shape was accepted. A match that is already present verbatim
+    # in the statement proves nothing, so it is downgraded to a candidate.
+    raw_text = (results.get("_ctx") or {}).get("raw_text") or ""
+    if not raw_text:
+        raw_text = results.get("raw") or ""
+    if isinstance(raw_text, bytes):
+        raw_text = raw_text.decode("utf-8", errors="replace")
+
     entries = []
     for cand in candidates:
         data = cand.get("data", b"")
@@ -96,11 +107,20 @@ def verify_candidates(results: dict, candidates=None) -> dict:
             entries.append(entry)
             continue
 
-        # 1) strict flag shape -- strongest evidence
+        # 1) strict flag shape -- strongest evidence, unless the statement itself
+        # already contains that exact string (then it is an example, not an answer)
         if flags:
-            entry.update({"state": "confirmed",
-                          "note": f"matches known flag format: {flags[0][:60]}",
-                          "flags": flags})
+            from_statement = bool(raw_text) and flags[0] in raw_text
+            if from_statement:
+                entry.update({"state": "candidate",
+                              "note": f"flag-shaped match {flags[0][:60]} appears verbatim "
+                                      f"in the challenge statement - an example, not an "
+                                      f"answer, so it cannot confirm itself",
+                              "flags": flags})
+            else:
+                entry.update({"state": "confirmed",
+                              "note": f"matches known flag format: {flags[0][:60]}",
+                              "flags": flags})
             entries.append(entry)
             continue
 

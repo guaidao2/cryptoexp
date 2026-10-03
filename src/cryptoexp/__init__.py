@@ -64,7 +64,7 @@ from .utils.rsa_ops import (
     factor_from_d, decrypt_with_factors, small_e_attack, broadcast_attack,
     common_modulus_attack, shared_prime_attack, wiener_attack, fermat_attack,
     pollard_attack, dp_leak_attack, phi_leak_attack, known_high_bits_attack,
-    auto_attack,
+    common_private_exponent_attack, auto_attack,
 )
 from .utils.prng import (
     MT19937, untemper, clone_from_outputs, predict_next, clone_python_random,
@@ -142,7 +142,7 @@ from .utils.symtools import (
 )
 from .utils.forensics import (
     batch_gcd, common_factor_pairs, parse_der_signature, parse_jwt,
-    audit_rsa_key, detect_weak_prng,
+    audit_rsa_key, detect_weak_prng, scan_structured_gcd,
 )
 from . import hypothesis
 from .hypothesis import (
@@ -205,6 +205,7 @@ _CANDIDATE_EXPORTS = [
     "factor_from_d", "decrypt_with_factors", "small_e_attack",
     "broadcast_attack", "common_modulus_attack", "shared_prime_attack",
     "wiener_attack", "fermat_attack", "pollard_attack", "dp_leak_attack",
+    "common_private_exponent_attack",
     "phi_leak_attack", "known_high_bits_attack", "auto_attack",
     # PRNG
     "MT19937", "untemper", "clone_from_outputs", "predict_next",
@@ -245,7 +246,7 @@ _CANDIDATE_EXPORTS = [
     "cbc_flip_plaintext", "cbc_decrypt_blocks", "strip_pkcs7", "pad_pkcs7",
     # real-world forensics (beyond CTF)
     "batch_gcd", "common_factor_pairs", "parse_der_signature", "parse_jwt",
-    "audit_rsa_key", "detect_weak_prng",
+    "audit_rsa_key", "detect_weak_prng", "scan_structured_gcd",
     # RSA attacks (extra) / keys
     "franklin_reiter", "hastad_padded", "stereotyped_message",
     "parity_oracle_attack", "lsb_oracle_attack", "rsa_recover_d_from_factors",

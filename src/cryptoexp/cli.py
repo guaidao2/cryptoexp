@@ -19,6 +19,13 @@ from .core.verify import verify_candidates
 from .core.solve import generate as gen_solve, list_solvers
 
 
+def _json_error(message: str) -> int:
+    """Error path for JSON consumers: stdout stays a JSON document, not a text line"""
+    print(json.dumps({"schema_version": "1.0", "error": message}, ensure_ascii=True,
+                     indent=2))
+    return 1
+
+
 def _run_one(target: str, args) -> dict:
     results = analyze_all(target, skip_encoding=args.no_encoding,
                           effort=getattr(args, "effort", "normal"),
@@ -27,41 +34,60 @@ def _run_one(target: str, args) -> dict:
     verification = verify_candidates(results)
     results["verification"] = verification
 
+    # Solve/run happens before the JSON branch on purpose: `--json --solve` used to
+    # return here and silently drop the solve step (the reporter lost time to that).
+    # Its progress lines go to stderr so stdout stays a single valid JSON document.
+    if args.solve or args.run:
+        path = gen_solve(results, out_dir=args.out, only=args.only)
+        print(f"[+] solve script: {path}", file=sys.stderr)
+        results["solve_script"] = path
+        if args.run:
+            import subprocess
+            print(f"[*] running {path} ...", file=sys.stderr)
+            proc = subprocess.run([sys.executable, path], capture_output=True,
+                                  text=True, timeout=300)
+            print(proc.stdout.rstrip() or "(no output)", file=sys.stderr)
+            if proc.returncode != 0:
+                # A failing generated script must not look like success: the reporter
+                # hit a skeleton returning 1 while the CLI still exited 0.
+                results["solve_failed"] = proc.returncode
+                print_warning(f"script exit code {proc.returncode} "
+                              f"(may be a [skeleton], see the notes above)")
+                if proc.stderr.strip():
+                    print(proc.stderr.strip()[-500:], file=sys.stderr)
+            else:
+                results["solve_ran"] = True
+
     if args.json:
         print(print_json_summary(results, verification))
         return results
 
     print_section_header(f"Analyzing target: {target}")
     print_results(results, verification)
-
-    if args.solve or args.run:
-        path = gen_solve(results, out_dir=args.out, only=args.only)
-        print_success(f"solve script: {path}")
-        if args.run:
-            print_info(f"running {path} ...")
-            import subprocess
-            proc = subprocess.run([sys.executable, path], capture_output=True,
-                                  text=True, timeout=120)
-            print(proc.stdout.rstrip() or "(no output)")
-            if proc.returncode != 0:
-                print_warning(f"script exit code {proc.returncode} "
-                              f"(may be a [skeleton], see the notes above)")
-                if proc.stderr.strip():
-                    print(proc.stderr.strip()[-500:])
     return results
 
 
 def cmd_analyze(args):
+    target = args.target
+    # A directory passed positionally used to be fed to the blackboard as one target,
+    # which merged 20 unrelated files into a single context and produced both a fake
+    # "shared prime" critical and a fake confirmed verdict. `--dir` did the sane thing
+    # all along, so a positional directory now means the same as --dir.
+    if target and os.path.isdir(target) and not args.dir:
+        print_warning(f"{target} is a directory: switching to batch mode "
+                      f"(same as --dir)")
+        args.dir = target
+
     if args.dir:
         if not os.path.isdir(args.dir):
             print_error(f"directory does not exist: {args.dir}")
-            return 1
+            return 1 if not args.json else _json_error(f"directory does not exist: {args.dir}")
         entries = [os.path.join(args.dir, n) for n in sorted(os.listdir(args.dir))
                    if os.path.isfile(os.path.join(args.dir, n))]
         if not entries:
             print_error("no files in the directory")
-            return 1
-        all_res = []
+            return 1 if not args.json else _json_error("no files in the directory")
+        all_res, failures = [], 0
         for i, p in enumerate(entries, 1):
             if args.json:
                 buf = io.StringIO()
@@ -70,17 +96,30 @@ def cmd_analyze(args):
                 all_res.append(json.loads(print_json_summary(r, r.get("verification"))))
             else:
                 print(f"\n=== [{i}/{len(entries)}] {os.path.basename(p)} ===")
-                _run_one(p, args)
+                r = _run_one(p, args)
+            failures += 1 if r.get("solve_failed") else 0
         if args.json:
-            print(json.dumps(all_res, ensure_ascii=False, indent=2, default=str))
-        return 0
+            # Batch output is wrapped in an object: the single-target payload is an
+            # object per schema/cryptoexp.schema.json, and a bare list here violated it.
+            print(json.dumps({"schema_version": "1.0", "mode": "batch",
+                              "targets": all_res},
+                             ensure_ascii=True, indent=2, default=str))
+        return 1 if failures else 0
 
-    if not args.target:
-        print_error('analyze needs <target> or --dir; '
-                    'the target may be a file, a directory or challenge text')
+    if not target:
+        message = ('analyze needs <target> or --dir; the target may be a file, '
+                   'a directory or challenge text')
+        if args.json:
+            return _json_error(message)      # stdout must stay one JSON document
+        print_error(message)
         return 1
-    _run_one(args.target, args)
-    return 0
+    # A path-looking argument that does not exist is almost always a typo; saying so
+    # beats silently analysing the path string as if it were the challenge text.
+    if (os.sep in target or target.endswith((".txt", ".py", ".json", ".pem"))) \
+            and not os.path.exists(target):
+        print_warning(f"{target} does not exist - treating it as inline challenge text")
+    r = _run_one(target, args)
+    return 1 if r.get("solve_failed") else 0
 
 
 def cmd_hypotheses(args):
@@ -147,18 +186,27 @@ def cmd_lab(args):
 
 def cmd_list(args):
     from .core.analysis import probe_optional_deps
+    from .core.solve import _register_builtins
+    from . import api as api_map
+    # The solver registry fills lazily on the first generate() call, so `list` used to
+    # print "(not registered yet)" for every template - which read as "no templates
+    # exist". Register them here instead.
+    _register_builtins()
     print_section_header("Analyzers (built-in + plugins)")
-    for name in ("encoding", "classical", "rsa", "symmetric", "numbertheory", "lattice"):
+    for name in ("encoding", "classical", "rsa", "symmetric", "numbertheory", "lattice",
+                 "crc", "lfsr"):
         print(f"  {name}")
     for name in list_analyzers():
         print(f"  {name}  (plugin)")
     print_section_header("solve templates (lower priority runs first)")
-    for name, prio in list_solvers() or [("(not registered yet, loaded on first generation)", "-")]:
+    for name, prio in list_solvers():
         print(f"  {prio:>4}  {name}")
     print_section_header("optional extras (core is dependency-free; missing ones are harmless)")
     for mod, info in probe_optional_deps().items():
         mark = "installed" if info["available"] else "missing"
         print(f"  {mod:<8} {mark}  {info['use']}")
+    print_section_header("API map (same as cryptoexp.api())")
+    print(api_map())
     return 0
 
 
@@ -206,6 +254,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None):
+    # A Windows console defaults to a legacy codepage (GBK here). The report prints
+    # candidate bytes, which can contain characters that codepage cannot encode - the
+    # run then died with UnicodeEncodeError and emitted no report at all. Reconfigure
+    # instead of hoping the locale is UTF-8; errors="replace" keeps a bad byte from
+    # killing the whole output.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass                     # a redirected/odd stream: nothing to do
     parser = build_parser()
     args = parser.parse_args(argv)
     if not args.command:
