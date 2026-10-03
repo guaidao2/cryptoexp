@@ -1,0 +1,2 @@
+# single byte XOR - ciphertext (hex)
+cipher = 3c363b3d212933343d363f0538232e3f05223528053329053f3b292327

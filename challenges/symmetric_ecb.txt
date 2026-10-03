@@ -1,0 +1,2 @@
+# block cipher - ciphertext (hex); identify the mode
+cipher = 3bfd04cc0d7ed55358e2cbe19de21383ac50dfd847077982bec986c1e8c37857ac50dfd847077982bec986c1e8c37857ac50dfd847077982bec986c1e8c37857377222e061a924c591cd9c27ea163ed4

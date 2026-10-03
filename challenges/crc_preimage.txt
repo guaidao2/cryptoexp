@@ -1,0 +1,8 @@
+# CRC-32 preimage - the flag body is unknown, the CRC is given
+The flag has the form flag{????}: exactly 4 unknown characters.
+prefix = "flag{"
+suffix = "}"
+unknown bytes = 4
+CRC-32 target = 0x7baa7b24
+poly = 0x04C11DB7, init = 0xFFFFFFFF, refin = true, refout = true,
+xorout = 0xFFFFFFFF

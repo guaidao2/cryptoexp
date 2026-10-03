@@ -1,0 +1,19 @@
+# Source distribution contents. Explicit on purpose: without this, a `python -m build`
+# run would sweep the third-party `intelpwn` clone, the internal `evidence` notes and
+# the scratch `.tmp` directory into the published sdist.
+include README.md
+include README.zh-CN.md
+include LICENSE
+include pyproject.toml
+recursive-include src/cryptoexp *.py
+recursive-include tests *.py
+recursive-include challenges *.py *.txt
+recursive-include schema *.json
+prune intelpwn
+prune evidence
+prune .tmp
+prune dist
+prune build
+prune solves
+prune lab
+global-exclude __pycache__ *.py[cod] *.egg-info

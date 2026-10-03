@@ -1,0 +1,6 @@
+# Fibonacci LFSR keystream - recover the taps, predict, then XOR
+The register emitted these bits first:
+1000011100110101101010001111111000010101010111110101000011101010
+The message below was XORed with the next 120 bits it emitted
+(MSB-first, bit for bit), so the plaintext is the flag:
+ciphertext = 0eaab0fad165fb19169f702a38826f

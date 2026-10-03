@@ -1,0 +1,2 @@
+# LCG - consecutive outputs; recover the parameters and predict the next value
+outputs: 637328488 406960257 1324944678 1399872871 670521108 1313889213 1163449778 295397635

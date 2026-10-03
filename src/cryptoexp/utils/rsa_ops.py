@@ -1,0 +1,372 @@
+"""RSA primitives and attack library — importable directly as infrastructure
+
+    from cryptoexp import rsa_ops as R
+    k = R.keygen(1024)
+    R.decrypt(k['d'], k['n'], c)
+    R.wiener_attack(e, n)          # → result dict
+
+Convention: every attack_* returns the same structure
+    {"ok": bool, "plaintext": bytes|None, "detail": str,
+     "factors": (p, q)|None, "d": int|None, "note": str}
+Both the analyser and the solve generator consume this structure — one
+implementation, two consumers.
+"""
+
+import random
+
+from . import algebra as A
+from . import lattice as L
+
+
+def itob(x: int) -> bytes:
+    """int → big-endian bytes (0 → b'\\x00')"""
+    if x < 0:
+        raise ValueError("negative number")
+    return b'\x00' if x == 0 else x.to_bytes((x.bit_length() + 7) // 8, 'big')
+
+
+def btoi(b: bytes) -> int:
+    return int.from_bytes(b, 'big')
+
+
+# pwntools-style aliases, so code can be moved over as it is
+long_to_bytes = itob
+bytes_to_long = btoi
+
+
+def _res(ok=False, **kw):
+    out = {"ok": ok, "plaintext": None, "detail": "", "factors": None,
+           "d": None, "note": ""}
+    out.update(kw)
+    return out
+
+
+# ────────────────────────── basic operations ──────────────────────────
+
+def keygen(bits: int = 1024, e: int = 65537, rng: random.Random = None):
+    """Generate an RSA key (for tests / target ranges) → dict(n, e, d, p, q, phi)"""
+    rng = rng or random
+    half = bits // 2
+    while True:
+        p = A.next_prime(rng.getrandbits(half) | (1 << (half - 1)))
+        q = A.next_prime(rng.getrandbits(half) | (1 << (half - 1)))
+        if p == q:
+            continue
+        phi = (p - 1) * (q - 1)
+        d = A.modinv(e, phi)
+        if d is None:
+            continue
+        return {"n": p * q, "e": e, "d": d, "p": p, "q": q, "phi": phi}
+
+
+def encrypt(m, e: int, n: int) -> int:
+    """m may be an int or bytes"""
+    if isinstance(m, (bytes, bytearray)):
+        m = btoi(bytes(m))
+    return pow(m, e, n)
+
+
+def decrypt(c: int, d: int, n: int):
+    """Returns an int (converting to bytes is the caller's decision — this avoids
+    the leading-zero ambiguity)"""
+    return pow(c, d, n)
+
+
+def crt_decrypt(n, e, c, p, q, dp=None, dq=None) -> int:
+    """CRT-accelerated decryption (faster with dp/dq; falls back to d)"""
+    if dp is not None and dq is not None:
+        m1 = pow(c % p, dp, p)
+        m2 = pow(c % q, dq, q)
+    else:
+        d = A.modinv(e, (p - 1) * (q - 1))
+        if d is None:
+            return 0
+        m1, m2 = pow(c, d, p), pow(c, d, q)
+    qinv = A.modinv(q, p)
+    h = (qinv * (m1 - m2)) % p
+    return m2 + h * q
+
+
+def reencrypt_check(m: int, e: int, n: int, c: int) -> bool:
+    """Re-encryption check: pow(m, e, n) == c — the criterion that upgrades a
+    claim from "looks like plaintext" to "mathematically correct"."""
+    return pow(m, e, n) == c % n
+
+
+# ────────────────────────── factorisation attacks ──────────────────────────
+
+def factor_from_phi(n: int, phi: int):
+    """Recover p, q from phi: p+q = n-phi+1, then solve the quadratic"""
+    s = n - phi + 1
+    disc = s * s - 4 * n
+    if disc < 0:
+        return None
+    r = A.perfect_square(disc)
+    if r is None or (s + r) % 2:
+        return None
+    p, q = (s + r) // 2, (s - r) // 2
+    return (p, q) if p * q == n and p > 1 and q > 1 else None
+
+
+def factor_from_d(n: int, e: int, d: int):
+    """Factor n from (n, e, d) — the standard random-base algorithm"""
+    k = e * d - 1
+    if k <= 0 or k % 2:
+        return None
+    t = 0
+    while k % 2 == 0:
+        k //= 2
+        t += 1
+    for g in list(range(2, 20)) + [random.randrange(2, max(3, n - 1)) for _ in range(8)]:
+        y = pow(g, k, n)
+        if y in (1, n - 1):
+            continue
+        for _ in range(t):
+            x = pow(y, 2, n)
+            if x == 1:
+                p = A.gcd(y - 1, n)
+                if 1 < p < n:
+                    return p, n // p
+                break
+            y = x
+    return None
+
+
+def decrypt_with_factors(n, e, c, p, q):
+    """Known p, q → decrypt (the factors are validated first; invalid ones are
+    rejected at once)"""
+    if not p or not q or p <= 1 or q <= 1 or p * q != n:
+        return _res(False, note=f"invalid factors (p×q {'=' if p and q else '?'} n), refusing")
+    d = A.modinv(e, (p - 1) * (q - 1))
+    if d is None:
+        return _res(False, note="e and phi are not coprime (needs special handling)")
+    m = pow(c, d, n)
+    return _res(True, plaintext=itob(m), d=d, factors=(p, q),
+                detail="known p/q → d → decryption")
+
+
+# ────────────────────────── attacks ──────────────────────────
+
+def small_e_attack(n, e, c):
+    """Small e with no padding: m^e = c (no modular reduction) → integer root"""
+    root, exact = A.iroot(c, e)
+    if exact and pow(root, e) == c and root < n:
+        return _res(True, plaintext=itob(root), detail=f"exact {e}-th power → integer root")
+    return _res(False, note=f"c is not an exact {e}-th power (try broadcast attack)")
+
+
+def broadcast_attack(e: int, pairs):
+    """Håstad broadcast: same e, e pairs (n_i, c_i) with pairwise coprime moduli
+    → CRT then integer root"""
+    pairs = [(int(c), int(n)) for c, n in pairs][:e]
+    if len(pairs) < e:
+        return _res(False, note=f"needs {e} pairs, only {len(pairs)} given")
+    res = A.crt(pairs)
+    if not res:
+        return _res(False, note="moduli are not coprime (switch to the shared-factor attack)")
+    root, exact = A.iroot(res[0], e)
+    if not exact:
+        return _res(False, note="CRT result is not an exact e-th power (padded plaintext?)")
+    return _res(True, plaintext=itob(root), detail=f"{e} pairs CRT'd, integer root succeeded")
+
+
+def common_modulus_attack(n, e1, c1, e2, c2):
+    """Same modulus, different exponents (gcd(e1,e2)=1): m = c1^a * c2^b mod n"""
+    g, a, b = A.egcd(e1, e2)
+    if g != 1:
+        return _res(False, note=f"gcd(e1,e2)={g} ≠ 1, needs factorisation first")
+    if a < 0:
+        inv = A.modinv(c1, n)
+        if inv is None:
+            return _res(False, note="c1 is not coprime with n — a plain gcd factors n")
+        part1 = pow(inv, -a, n)
+    else:
+        part1 = pow(c1, a, n)
+    part2 = pow(c2, b, n) if b >= 0 else pow(A.modinv(c2, n), -b, n)
+    m = part1 * part2 % n
+    if not reencrypt_check(m, e1, n, c1):
+        return _res(False, note="recovered m failed the re-encryption check")
+    return _res(True, plaintext=itob(m), detail="common modulus attack")
+
+
+def shared_prime_attack(pairs):
+    """Several (n, c) pairs: find a shared prime factor → decrypt (the king of
+    give-away CTF tasks)
+
+    Returns: the result dict, with plaintext being the first message decrypted
+    successfully; every result is in results
+    """
+    items = [(int(n), int(c)) for n, c in pairs]
+    outs = []
+    for i in range(len(items)):
+        for j in range(i + 1, len(items)):
+            n1, c1 = items[i]
+            n2, _ = items[j]
+            g = A.gcd(n1, n2)
+            if 1 < g < min(n1, n2):
+                p = A.gcd(n1, g)
+                q = n1 // p
+                if p * q != n1:
+                    continue
+                outs.append((n1, c1, p, q))
+                p2 = A.gcd(n2, g)
+                if 1 < p2 < n2:
+                    outs.append((n2, items[j][1], p2, n2 // p2))
+                break
+        if outs:
+            break
+    if not outs:
+        return _res(False, note="no shared prime factor found")
+    results = []
+    for n, c, p, q in outs:
+        e = 65537
+        r = decrypt_with_factors(n, e, c, p, q)
+        if r["ok"]:
+            results.append({"n": n, "p": p, "q": q, "plaintext": r["plaintext"]})
+    if not results:
+        return _res(False, note="factorisation worked but decryption failed (e not 65537?)")
+    return _res(True, plaintext=results[0]["plaintext"], factors=(results[0]["p"], results[0]["q"]),
+                detail=f"shared-factor factorisation, {len(results)} pairs decrypted",
+                note=str(len(results)),
+                **{"results": results})
+
+
+def wiener_attack(e, n, c=None):
+    """d too small → recover d from the continued-fraction convergents"""
+    hit = A.wiener_attack(e, n)
+    if not hit:
+        return _res(False, note="d does not meet the Wiener condition (d > n^0.25/3)")
+    d, p, q = hit
+    out = _res(True, factors=(p, q), d=d, detail=f"Wiener recovered d ({d.bit_length()} bits)")
+    if c is not None:
+        m = pow(c, d, n)
+        out["plaintext"] = itob(m)
+        out["note"] = "re-encryption check" if reencrypt_check(m, e, n, c) else ""
+    return out
+
+
+def fermat_attack(n, e=65537, c=None, max_iter: int = 1000000):
+    """p and q close → Fermat factorisation"""
+    f = A.fermat_factor(n, max_iter=max_iter)
+    if not f:
+        return _res(False, note=f"not factored in {max_iter} rounds (p, q not close enough)")
+    p, q = f
+    r = decrypt_with_factors(n, e, c, p, q) if c is not None else \
+        _res(True, factors=(p, q), detail="Fermat factorisation succeeded")
+    r["factors"] = (p, q)
+    if c is not None and r["ok"]:
+        r["detail"] = "Fermat factorisation → decrypt"
+    return r
+
+
+def pollard_attack(n, e=65537, c=None, max_steps: int = 1000000):
+    """Bounded Pollard rho factorisation (when n is not too large)"""
+    fac = A.factor_limited(n, max_steps=max_steps)
+    if not fac or len(fac) < 2:
+        return _res(False, note=f"not factored within {max_steps} steps")
+    ks = list(fac)
+    p, q = ks[0], n // ks[0]
+    if c is None:
+        return _res(True, factors=(p, q), detail="Pollard rho factorisation succeeded")
+    r = decrypt_with_factors(n, e, c, p, q)
+    r["factors"] = (p, q)
+    if r["ok"]:
+        r["detail"] = "Pollard rho factorisation → decrypt"
+    return r
+
+
+def dp_leak_attack(n, e, dp, c=None):
+    """dp = d mod (p-1) leaked → gcd(2^(e*dp) - 2, n) = p"""
+    try:
+        p = A.gcd(pow(2, e * dp, n) - 2, n)
+    except Exception:
+        p = 1
+    if not (1 < p < n):
+        return _res(False, note="gcd gave no non-trivial factor (dp/e may be wrong)")
+    q = n // p
+    if c is None:
+        return _res(True, factors=(p, q), detail="dp leak → factorisation succeeded")
+    r = decrypt_with_factors(n, e, c, p, q)
+    r["factors"] = (p, q)
+    if r["ok"]:
+        r["detail"] = "dp leak → factorisation → decryption"
+    return r
+
+
+def phi_leak_attack(n, e, phi, c=None):
+    """phi leaked → recover p, q"""
+    f = factor_from_phi(n, phi)
+    if not f:
+        return _res(False, note="phi → p, q recovery failed (is phi an Euler totient?)")
+    p, q = f
+    if c is None:
+        return _res(True, factors=(p, q), detail="phi leak → factorisation succeeded")
+    return decrypt_with_factors(n, e, c, p, q)
+
+
+def known_high_bits_attack(n, p_high, known_bits, e=None, c=None, total_bits=None):
+    """Known high bits of p → Coppersmith (LLL small roots)"""
+    res = L.known_high_bits_factor(n, p_high, known_bits, total_bits)
+    if res.get("factor"):
+        p, q = res["factor"], n // res["factor"]
+    elif res.get("p"):
+        p, q = res["p"], res["q"]
+    else:
+        return _res(False, note=res.get("note", "small root not hit"))
+    if c is not None and e:
+        r = decrypt_with_factors(n, e, c, p, q)
+        r["factors"] = (p, q)
+        if r["ok"]:
+            r["detail"] = "Coppersmith high-bits factorisation → decryption"
+        return r
+    return _res(True, factors=(p, q), detail="Coppersmith high-bits factorisation succeeded")
+
+
+# ────────────────────────── convenience wrapper (try everything) ──────────────────────────
+
+def auto_attack(n, e=65537, c=None, pairs=None, p=None, q=None, d=None,
+                phi=None, dp=None, max_steps: int = 500000):
+    """Try the common attacks automatically, cheapest first → the first success
+
+    pairs: [(n_i, c_i), ...] used for shared-factor / broadcast checks when
+    several sets are available
+    """
+    if p and q and p * q == n:
+        return decrypt_with_factors(n, e, c, p, q) if c is not None else \
+            _res(True, factors=(p, q), detail="known p, q")
+    if d:
+        out = _res(True, d=d, detail="known d")
+        if c is not None:
+            m = pow(c, d, n)
+            out["plaintext"] = itob(m)
+        return out
+    if phi:
+        r = phi_leak_attack(n, e, phi, c)
+        if r["ok"]:
+            return r
+    if dp:
+        r = dp_leak_attack(n, e, dp, c)
+        if r["ok"]:
+            return r
+    if pairs:
+        r = shared_prime_attack([(nn, cc) for nn, cc in pairs])
+        if r["ok"]:
+            return r
+        if e <= 17:
+            r = broadcast_attack(e, [(cc, nn) for nn, cc in pairs])
+            if r["ok"]:
+                return r
+    if e <= 17 and c is not None:
+        r = small_e_attack(n, e, c)
+        if r["ok"]:
+            return r
+    r = wiener_attack(e, n, c)
+    if r["ok"]:
+        return r
+    r = fermat_attack(n, e, c)
+    if r["ok"]:
+        return r
+    r = pollard_attack(n, e, c, max_steps=max_steps)
+    if r["ok"]:
+        return r
+    return _res(False, note="auto_attack: none of the common attack surfaces apply")

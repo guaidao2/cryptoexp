@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/cryptoexp/schema/cryptoexp.schema.json",
+  "title": "cryptoexp JSON output schema v1.0",
+  "type": "object",
+  "required": ["schema_version", "target", "context", "candidates", "findings"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "target": { "type": ["string", "null"] },
+    "context": {
+      "type": "object",
+      "properties": {
+        "target": { "type": ["string", "null"] },
+        "kind": { "type": ["string", "null"], "enum": ["file", "dir", "inline", null] },
+        "files": { "type": "array" },
+        "named": { "type": "object" },
+        "blob_count": { "type": ["integer", "null"] },
+        "data_count": { "type": ["integer", "null"] },
+        "warnings": { "type": "array" }
+      }
+    },
+    "rsa": {
+      "type": "object",
+      "properties": {
+        "params": {
+          "type": "object",
+          "properties": {
+            "n": { "type": ["string", "integer", "null"] },
+            "e": { "type": ["string", "integer", "null"] },
+            "c": { "type": ["string", "integer", "null"] },
+            "n_bits": { "type": ["integer", "null"] },
+            "e_assumed": { "type": ["boolean", "null"] }
+          }
+        },
+        "vulns": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": { "type": ["string", "null"] },
+              "severity": {
+                "type": ["string", "null"],
+                "enum": ["critical", "high", "medium", "low", "info", null]
+              },
+              "confidence": {
+                "type": ["string", "null"],
+                "enum": ["high", "medium", "low", null]
+              },
+              "detail": { "type": ["string", "null"] },
+              "attack": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "symmetric": {
+      "type": "object",
+      "properties": {
+        "mode": { "type": ["string", "null"], "enum": ["ECB", "CBC/other", "unknown", null] },
+        "block_size": { "type": ["integer", "null"] },
+        "repeated_blocks": { "type": "array" },
+        "oracle_hints": { "type": "object" }
+      }
+    },
+    "numbertheory": { "type": "object" },
+    "lattice": { "type": "object" },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "source": { "type": ["string", "null"] },
+          "attack": { "type": ["string", "null"] },
+          "confidence": {
+            "type": ["string", "null"],
+            "enum": ["high", "medium", "low", null]
+          },
+          "detail": { "type": ["string", "null"] },
+          "preview": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "source": { "type": ["string", "null"] },
+          "type": { "type": ["string", "null"] },
+          "severity": {
+            "type": ["string", "null"],
+            "enum": ["critical", "high", "medium", "low", "info", null]
+          },
+          "confidence": {
+            "type": ["string", "null"],
+            "enum": ["high", "medium", "low", null]
+          },
+          "detail": { "type": ["string", "null"] },
+          "attack": { "type": ["string", "null"] },
+          "exploitable": { "type": ["boolean", "null"] }
+        }
+      }
+    },
+    "max_severity": {
+      "type": ["string", "null"],
+      "enum": ["critical", "high", "medium", "low", "info", null]
+    },
+    "strategy": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": { "type": ["string", "null"] },
+          "priority": { "type": ["integer", "null"] },
+          "why": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "hypotheses": {
+      "type": "object",
+      "properties": {
+        "applicable": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": ["string", "null"] },
+              "domain": { "type": ["string", "null"] },
+              "idea": { "type": ["string", "null"] },
+              "gives": { "type": ["string", "null"] },
+              "cost": {
+                "type": ["string", "null"],
+                "enum": ["cheap", "moderate", "expensive", null]
+              }
+            }
+          }
+        },
+        "gaps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": ["string", "null"] },
+              "missing": { "type": "array" },
+              "idea": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "properties": {
+        "verdict": { "type": ["string", "null"] },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "attack": { "type": ["string", "null"] },
+              "source": { "type": ["string", "null"] },
+              "length": { "type": ["integer", "null"] },
+              "preview": { "type": ["string", "null"] },
+              "state": {
+                "type": ["string", "null"],
+                "enum": ["confirmed", "candidate", "not_reproduced", null]
+              },
+              "note": { "type": ["string", "null"] },
+              "confidence": {
+                "type": ["string", "null"],
+                "enum": ["high", "medium", "low", null]
+              }
+            }
+          }
+        }
+      }
+    },
+    "extra": {
+      "type": "object",
+      "description": "Wildcard block: every plugin analyzer key lands here automatically"
+    }
+  }
+}
