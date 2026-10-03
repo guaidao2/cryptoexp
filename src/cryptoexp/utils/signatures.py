@@ -37,6 +37,8 @@ def ecdsa_nonce_reuse(n, r, s1, s2, h1, h2):
     k = (h1 - h2) / (s1 - s2) mod n, then d = (s1*k - h1) / r mod n.
     Both k and d are verified by re-deriving the signatures, so a wrong input
     cannot masquerade as a success.
+    Returns: the standard result dict; the recovered private key is
+             result["d"] and the reused nonce is result["meta"]["k"].
     """
     denom = (s1 - s2) % n
     inv = A.modinv(denom, n)
@@ -55,6 +57,8 @@ def dsa_nonce_reuse(p, q, g, y, r, s1, s2, h1, h2):
     """Same attack for DSA; `y` is the public key (verification uses it)
 
     Returns the private key x and the reused nonce k.
+    Returns: the standard result dict; the recovered private key is
+             result["d"] and the reused nonce is result["meta"]["k"].
     """
     denom = (s1 - s2) % q
     inv = A.modinv(denom, q)

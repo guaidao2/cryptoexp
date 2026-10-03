@@ -10,6 +10,10 @@ Convention: every attack_* returns the same structure
      "factors": (p, q)|None, "d": int|None, "note": str}
 Both the analyser and the solve generator consume this structure — one
 implementation, two consumers.
+
+Every public attack repeats that contract in its own docstring, because `help(fn)`
+shows only the function's docstring and never this module header (a user hit exactly
+that: the returned dict was mistaken for the plaintext).
 """
 
 import random
@@ -18,15 +22,37 @@ from . import algebra as A
 from . import lattice as L
 
 
+_RESULT_KEYS = '{"ok", "plaintext", "detail", "factors", "d", "note"}'
+
+_MIXUP_HINT = (
+    " If this value came from an attack function, it is the result dict: read "
+    "result['plaintext'] (bytes), or result['factors']/result['d'] for the "
+    "factor-based attacks. Contract: " + _RESULT_KEYS
+)
+
+
 def itob(x: int) -> bytes:
-    """int → big-endian bytes (0 → b'\\x00')"""
+    """int → big-endian bytes (0 → b'\\x00')
+
+    Attack functions return the standard result dict, not an integer, so handing one
+    of those here is a common mix-up. It is rejected with a message that names the
+    fix, instead of failing later inside `x.to_bytes` with an opaque type error
+    (reported by a user solving RSA tasks, 2026-10-03).
+    """
+    if isinstance(x, bool) or not isinstance(x, int):
+        raise TypeError(f"itob/long_to_bytes expects an int, got {type(x).__name__}."
+                        + _MIXUP_HINT)
     if x < 0:
         raise ValueError("negative number")
     return b'\x00' if x == 0 else x.to_bytes((x.bit_length() + 7) // 8, 'big')
 
 
 def btoi(b: bytes) -> int:
-    return int.from_bytes(b, 'big')
+    """bytes → big-endian int (the inverse of `itob`)"""
+    if not isinstance(b, (bytes, bytearray, memoryview)):
+        raise TypeError(f"btoi/bytes_to_long expects bytes, got {type(b).__name__}."
+                        + _MIXUP_HINT)
+    return int.from_bytes(bytes(b), 'big')
 
 
 # pwntools-style aliases, so code can be moved over as it is
@@ -35,6 +61,22 @@ bytes_to_long = btoi
 
 
 def _res(ok=False, **kw):
+    """Build the standard result structure every attack returns
+
+    The contract, in one place so it cannot drift:
+
+        {"ok": bool,              # did the attack succeed
+         "plaintext": bytes|None, # the answer, when the attack yields plaintext
+         "detail": str,           # how it was obtained
+         "factors": (p, q)|None,  # factor-based attacks
+         "d": int|None,           # key-recovery attacks
+         "note": str}             # why it failed / what is missing
+
+    Both the analyzer and the solve generator consume this structure - one
+    implementation, two consumers - so a new attack fills it rather than returning a
+    bare int or bytes. Private on purpose: callers meet the contract through the
+    public attack functions, each of which documents it in its own `help()`.
+    """
     out = {"ok": ok, "plaintext": None, "detail": "", "factors": None,
            "d": None, "note": ""}
     out.update(kw)
@@ -134,7 +176,11 @@ def factor_from_d(n: int, e: int, d: int):
 
 def decrypt_with_factors(n, e, c, p, q):
     """Known p, q → decrypt (the factors are validated first; invalid ones are
-    rejected at once)"""
+    rejected at once)
+    Returns: the standard result dict - {"ok", "plaintext", "detail", "factors",
+             "d", "note"}; the answer, when there is one, is result["plaintext"]
+             (bytes), or result["factors"] / result["d"] for the factor attacks.
+    """
     if not p or not q or p <= 1 or q <= 1 or p * q != n:
         return _res(False, note=f"invalid factors (p×q {'=' if p and q else '?'} n), refusing")
     d = A.modinv(e, (p - 1) * (q - 1))
@@ -148,7 +194,11 @@ def decrypt_with_factors(n, e, c, p, q):
 # ────────────────────────── attacks ──────────────────────────
 
 def small_e_attack(n, e, c):
-    """Small e with no padding: m^e = c (no modular reduction) → integer root"""
+    """Small e with no padding: m^e = c (no modular reduction) → integer root
+    Returns: the standard result dict - {"ok", "plaintext", "detail", "factors",
+             "d", "note"}; the answer, when there is one, is result["plaintext"]
+             (bytes), or result["factors"] / result["d"] for the factor attacks.
+    """
     root, exact = A.iroot(c, e)
     if exact and pow(root, e) == c and root < n:
         return _res(True, plaintext=itob(root), detail=f"exact {e}-th power → integer root")
@@ -157,7 +207,11 @@ def small_e_attack(n, e, c):
 
 def broadcast_attack(e: int, pairs):
     """Håstad broadcast: same e, e pairs (n_i, c_i) with pairwise coprime moduli
-    → CRT then integer root"""
+    → CRT then integer root
+    Returns: the standard result dict - {"ok", "plaintext", "detail", "factors",
+             "d", "note"}; the answer, when there is one, is result["plaintext"]
+             (bytes), or result["factors"] / result["d"] for the factor attacks.
+    """
     pairs = [(int(c), int(n)) for c, n in pairs][:e]
     if len(pairs) < e:
         return _res(False, note=f"needs {e} pairs, only {len(pairs)} given")
@@ -171,7 +225,14 @@ def broadcast_attack(e: int, pairs):
 
 
 def common_modulus_attack(n, e1, c1, e2, c2):
-    """Same modulus, different exponents (gcd(e1,e2)=1): m = c1^a * c2^b mod n"""
+    """Same modulus, different exponents (gcd(e1,e2)=1): m = c1^a * c2^b mod n
+
+    The recovered message is delivered as result["plaintext"] (bytes), not as the
+    integer m - reading the line above as "returns an int" is a known trap.
+    Returns: the standard result dict - {"ok", "plaintext", "detail", "factors",
+             "d", "note"}; the answer, when there is one, is result["plaintext"]
+             (bytes), or result["factors"] / result["d"] for the factor attacks.
+    """
     g, a, b = A.egcd(e1, e2)
     if g != 1:
         return _res(False, note=f"gcd(e1,e2)={g} ≠ 1, needs factorisation first")
@@ -232,7 +293,11 @@ def shared_prime_attack(pairs):
 
 
 def wiener_attack(e, n, c=None):
-    """d too small → recover d from the continued-fraction convergents"""
+    """d too small → recover d from the continued-fraction convergents
+    Returns: the standard result dict - {"ok", "plaintext", "detail", "factors",
+             "d", "note"}; the answer, when there is one, is result["plaintext"]
+             (bytes), or result["factors"] / result["d"] for the factor attacks.
+    """
     hit = A.wiener_attack(e, n)
     if not hit:
         return _res(False, note="d does not meet the Wiener condition (d > n^0.25/3)")
@@ -246,7 +311,11 @@ def wiener_attack(e, n, c=None):
 
 
 def fermat_attack(n, e=65537, c=None, max_iter: int = 1000000):
-    """p and q close → Fermat factorisation"""
+    """p and q close → Fermat factorisation
+    Returns: the standard result dict - {"ok", "plaintext", "detail", "factors",
+             "d", "note"}; the answer, when there is one, is result["plaintext"]
+             (bytes), or result["factors"] / result["d"] for the factor attacks.
+    """
     f = A.fermat_factor(n, max_iter=max_iter)
     if not f:
         return _res(False, note=f"not factored in {max_iter} rounds (p, q not close enough)")
@@ -260,7 +329,11 @@ def fermat_attack(n, e=65537, c=None, max_iter: int = 1000000):
 
 
 def pollard_attack(n, e=65537, c=None, max_steps: int = 1000000):
-    """Bounded Pollard rho factorisation (when n is not too large)"""
+    """Bounded Pollard rho factorisation (when n is not too large)
+    Returns: the standard result dict - {"ok", "plaintext", "detail", "factors",
+             "d", "note"}; the answer, when there is one, is result["plaintext"]
+             (bytes), or result["factors"] / result["d"] for the factor attacks.
+    """
     fac = A.factor_limited(n, max_steps=max_steps)
     if not fac or len(fac) < 2:
         return _res(False, note=f"not factored within {max_steps} steps")
@@ -276,7 +349,11 @@ def pollard_attack(n, e=65537, c=None, max_steps: int = 1000000):
 
 
 def dp_leak_attack(n, e, dp, c=None):
-    """dp = d mod (p-1) leaked → gcd(2^(e*dp) - 2, n) = p"""
+    """dp = d mod (p-1) leaked → gcd(2^(e*dp) - 2, n) = p
+    Returns: the standard result dict - {"ok", "plaintext", "detail", "factors",
+             "d", "note"}; the answer, when there is one, is result["plaintext"]
+             (bytes), or result["factors"] / result["d"] for the factor attacks.
+    """
     try:
         p = A.gcd(pow(2, e * dp, n) - 2, n)
     except Exception:
@@ -294,7 +371,11 @@ def dp_leak_attack(n, e, dp, c=None):
 
 
 def phi_leak_attack(n, e, phi, c=None):
-    """phi leaked → recover p, q"""
+    """phi leaked → recover p, q
+    Returns: the standard result dict - {"ok", "plaintext", "detail", "factors",
+             "d", "note"}; the answer, when there is one, is result["plaintext"]
+             (bytes), or result["factors"] / result["d"] for the factor attacks.
+    """
     f = factor_from_phi(n, phi)
     if not f:
         return _res(False, note="phi → p, q recovery failed (is phi an Euler totient?)")
@@ -305,7 +386,11 @@ def phi_leak_attack(n, e, phi, c=None):
 
 
 def known_high_bits_attack(n, p_high, known_bits, e=None, c=None, total_bits=None):
-    """Known high bits of p → Coppersmith (LLL small roots)"""
+    """Known high bits of p → Coppersmith (LLL small roots)
+    Returns: the standard result dict - {"ok", "plaintext", "detail", "factors",
+             "d", "note"}; the answer, when there is one, is result["plaintext"]
+             (bytes), or result["factors"] / result["d"] for the factor attacks.
+    """
     res = L.known_high_bits_factor(n, p_high, known_bits, total_bits)
     if res.get("factor"):
         p, q = res["factor"], n // res["factor"]
@@ -330,6 +415,9 @@ def auto_attack(n, e=65537, c=None, pairs=None, p=None, q=None, d=None,
 
     pairs: [(n_i, c_i), ...] used for shared-factor / broadcast checks when
     several sets are available
+    Returns: the standard result dict - {"ok", "plaintext", "detail", "factors",
+             "d", "note"}; the answer, when there is one, is result["plaintext"]
+             (bytes), or result["factors"] / result["d"] for the factor attacks.
     """
     if p and q and p * q == n:
         return decrypt_with_factors(n, e, c, p, q) if c is not None else \

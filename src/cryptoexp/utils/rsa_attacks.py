@@ -182,6 +182,9 @@ def franklin_reiter(n, e, c1, c2, a, b, max_degree: int = 12):
     root can be read straight off it; the result is then confirmed by
     re-encryption. A non-invertible leading coefficient in the Euclidean chain
     returns a non-trivial factor of n instead, which is just as good a win.
+    Returns: the standard result dict - {"ok", "plaintext", "detail", "factors",
+             "d", "note"}; the answer, when there is one, is result["plaintext"]
+             (bytes), or result["factors"] / result["d"] for the factor attacks.
     """
     n, e, c1, c2, a, b = int(n), int(e), int(c1), int(c2), int(a), int(b)
     if e < 2:
@@ -266,6 +269,9 @@ def hastad_padded(e, triples, bound=None, time_budget: float = 60.0):
     is a small root of P. Coppersmith (Howgrave-Graham) finds roots below
     N^(1/e). The recovered m is accepted only when it satisfies every original
     congruence (pow(m + pad_i, e, n_i) == c_i) - the re-encryption check.
+    Returns: the standard result dict - {"ok", "plaintext", "detail", "factors",
+             "d", "note"}; the answer, when there is one, is result["plaintext"]
+             (bytes), or result["factors"] / result["d"] for the factor attacks.
     """
     if e is None or int(e) < 2:
         return R._res(False, note=f"e={e} is not a valid public exponent")
@@ -401,6 +407,9 @@ def stereotyped_message(n, e, c, known_prefix, known_suffix=b"", bound=None,
                bound = 1 << (8*L).
         max_unknown_bytes: only used when bound is None
         time_budget: seconds spent across all attempts
+    Returns: the standard result dict - {"ok", "plaintext", "detail", "factors",
+             "d", "note"}; the answer, when there is one, is result["plaintext"]
+             (bytes), or result["factors"] / result["d"] for the factor attacks.
     """
     try:
         n, e, c = int(n), int(e), int(c)
@@ -536,6 +545,9 @@ def parity_oracle_attack(n, e, c, oracle, max_iter: int = None):
     The result is confirmed by re-encryption; an oracle that answers for a
     padded plaintext, for the wrong ciphertext, or inconsistently yields
     ok=False with a note saying so.
+    Returns: the standard result dict - {"ok", "plaintext", "detail", "factors",
+             "d", "note"}; the answer, when there is one, is result["plaintext"]
+             (bytes), or result["factors"] / result["d"] for the factor attacks.
     """
     n, e, c = int(n), int(e), int(c)
     if e < 1:

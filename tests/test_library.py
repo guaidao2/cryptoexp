@@ -566,6 +566,73 @@ class TestSymTools(unittest.TestCase):
         self.assertIsNone(T.strip_pkcs7(b"bad padding\x00\x05"))
 
 
+class TestResultContract(unittest.TestCase):
+    """The result-dict contract must be visible from `help(fn)`, not only the module
+
+    A user solving NSSCTF RSA tasks reported the exact failure this guards against:
+    the structure is documented in the module docstring, but `help(name)` shows only
+    the function's own docstring, so the returned dict was mistaken for the answer and
+    the real error surfaced frames later inside `long_to_bytes`.
+    """
+
+    # Public functions that hand back the standard result dict (or their own dict)
+    DOCUMENTED = (
+        "decrypt_with_factors", "small_e_attack", "broadcast_attack",
+        "common_modulus_attack", "wiener_attack", "fermat_attack", "pollard_attack",
+        "dp_leak_attack", "phi_leak_attack", "known_high_bits_attack", "auto_attack",
+        "franklin_reiter", "hastad_padded", "stereotyped_message",
+        "parity_oracle_attack", "ecdsa_nonce_reuse", "dsa_nonce_reuse",
+        "coppersmith_univariate", "known_high_bits_factor", "discrete_log",
+        "pohlig_hellman", "dlog_feasibility", "solve_lcg_params", "length_extension",
+        "generate_findings", "context_public", "parse_ssh_public_key", "parse_jwt",
+        "audit_rsa_key", "batch_gcd", "detect_weak_prng", "parse_der_signature",
+    )
+
+    def test_every_dict_returning_function_documents_its_return(self):
+        # two of them are presentation-layer helpers, reachable by path rather than
+        # from the package root; they still owe the caller a return description
+        from cryptoexp.core.analysis import findings as _findings
+        from cryptoexp.core import context as _context
+        internal = {"generate_findings": _findings.generate_findings,
+                    "context_public": _context.context_public}
+        missing = []
+        for name in self.DOCUMENTED:
+            fn = getattr(ck, name, None) or internal.get(name)
+            self.assertIsNotNone(fn, f"{name} is not reachable")
+            doc = (fn.__doc__ or "").lower()
+            # "documented" means the docstring *states the shape*: either a Returns
+            # section or an inline arrow with braces. Each family has its own keys, so
+            # the check is about visibility, not about one particular key set.
+            has_return = any(marker in doc for marker in
+                             ("returns:", "returns {", "return {", "-> {", "-> dict"))
+            if not has_return:
+                missing.append(name)
+        self.assertEqual(missing, [],
+                         f"return a dict but never say so in help(): {missing}")
+
+    def test_standard_structure_keys(self):
+        """All six keys, always — consumers rely on the shape, not on the attack"""
+        key = ck.keygen(256, e=3)
+        res = ck.wiener_attack(key["e"], key["n"], c=pow(1234, key["e"], key["n"]))
+        self.assertEqual(set(res), {"ok", "plaintext", "detail", "factors", "d", "note"})
+        self.assertIsInstance(res["ok"], bool)
+
+    def test_dict_passed_to_long_to_bytes_explains_the_mixup(self):
+        """The dict-vs-int mix-up must name the fix, not fail inside to_bytes"""
+        with self.assertRaises(TypeError) as ctx:
+            ck.long_to_bytes({"ok": True, "plaintext": b"x", "d": 3})
+        message = str(ctx.exception)
+        self.assertIn("result", message)
+        self.assertIn("plaintext", message)
+        self.assertIn("dict", message)
+        with self.assertRaises(TypeError) as ctx2:
+            ck.bytes_to_long({"ok": True})
+        self.assertIn("bytes", str(ctx2.exception))
+        # the normal path is untouched
+        self.assertEqual(ck.long_to_bytes(0x4142), b"AB")
+        self.assertEqual(ck.bytes_to_long(b"AB"), 0x4142)
+
+
 class TestAPI(unittest.TestCase):
 
     def test_all_exports_resolve(self):

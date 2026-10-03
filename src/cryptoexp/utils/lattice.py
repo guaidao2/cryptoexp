@@ -363,8 +363,9 @@ def known_high_bits_factor(N: int, p_high: int, known_bits: int, total_bits: int
 
     f(x) = p_high * 2^shift + x, where shift = number of unknown bits; Coppersmith
     finds the small root.
-    Returns {"p", "q", "root", "note"} (p/q are verified by multiplication;
-    without verification nothing is returned).
+    Returns {"p", "q", "root", "note"} (p/q are verified by multiplication).
+    On failure the same four keys are present with value None - the dict is always
+    returned, so callers check `res["p"] is not None` rather than expecting no value.
     """
     total_bits = total_bits or N.bit_length()
     shift = max(1, total_bits // 2 - known_bits)

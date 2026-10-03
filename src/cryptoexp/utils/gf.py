@@ -125,6 +125,8 @@ def solve_lcg_params(outputs, p):
     Difference from algebra.lcg_recover: here the modulus p is known and the
     linear system is solved directly, with no difference-gcd estimation — a good
     fit when the task hands you p.
+    Returns: {"a", "c", "m", "info"} on success, or None when the outputs
+             do not determine the parameters (it never guesses).
     """
     xs = [x % p for x in outputs]
     if len(xs) < 3:

@@ -107,7 +107,10 @@ def is_smooth(n: int, bound: int = 10 ** 6):
 
 def dlog_feasibility(p, bound: int = 10 ** 6):
     """Do not solve anything; just judge whether this DLP falls to the generic
-    methods → a verdict plus the reason"""
+    methods → a verdict plus the reason
+    Returns: {"feasible": bool, "why": str} - a judgement only, never a
+             solution.
+    """
     order = p - 1
     if p.bit_length() <= 48:
         return {"feasible": True, "why": f"modulus is only {p.bit_length()} bits, BSGS suffices"}

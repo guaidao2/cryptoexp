@@ -26,7 +26,9 @@ def _collect_vulns(results: dict):
 
 
 def generate_findings(results: dict) -> dict:
-    """Merge the vuln table + max severity + candidate solution counts"""
+    """Merge the vuln table + max severity + candidate solution counts
+    Returns: {"count", "max_severity", "items", "candidate_count"}.
+    """
     items = _collect_vulns(results)
 
     # Encoding/classical layer content surfaces as "candidates"; normalize it into the

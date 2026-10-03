@@ -178,7 +178,11 @@ def _extract_blobs(text: str, source: str):
 
 
 def context_public(ctx: dict) -> dict:
-    """Public view for reports/JSON (large fields truncated, no internal references)"""
+    """Public view for reports/JSON (large fields truncated, no internal references)
+    Returns: a JSON-safe view {"target", "kind", "files", "named",
+             "blob_count", "data_count", "warnings"} with large fields
+             truncated; the internal blackboard (`_ctx`) never leaks.
+    """
     return {
         "target": ctx["target"],
         "kind": ctx["kind"],
