@@ -5,6 +5,37 @@ alpha series was never closed with a final `0.1.0` — the work folded into `0.2
 
 [PEP 440]: https://peps.python.org/pep-0440/
 
+## 0.2.0 — 2026-10-03 (first stable release)
+
+The first non-preview release: the content of `0.2.0b1` plus the five defects reported
+against it, and an explicit API-stability statement in both READMEs (what is stable, what is
+experimental with measured limits, and what is still a reported gap).
+
+### Fixed (reported against 0.2.0b1)
+
+- `analyze` scored strings it had already identified as encoded. A base64 input produced
+  caesar/affine candidates ("shift=5, score 80.72" for `bXNobntGMGJfTjBhXzGBfQ==`) and put
+  "classical cipher recovery" into the recommended path, pushing the route that matters
+  (decode first) out of the way. Encoded chunks are now deferred with a note pointing at the
+  decoded bytes, and a genuine Caesar ciphertext is unaffected.
+- Confidence no longer comes from a score alone. A candidate with no known flag prefix is
+  capped at "medium" with the reason attached, so `repeating_key_xor` no longer reports
+  "high" for a wrong plaintext while `analyze` calls the same data unverified. A real
+  `flag{...}` hit is still "high".
+- `linearize` walks its effort ladder cheapest-first and reports which rung answered, so a
+  shape that used to spend 86 seconds at `effort="normal"` returns in 0.03 s at `light`, with
+  the note saying so. `effort` is now a ceiling; the measured ceiling is in the docstring.
+- `common_modulus_attack` implements the `gcd(e1, e2) = g > 1` path instead of claiming it
+  "needs factorisation first": Bezout still yields `m^g mod n`, and when `m^g < n` the exact
+  g-th root is the plaintext. Only `m^g >= n` stays a failure, with an honest note.
+- Repeated-key search with a pluggable byte operator: `repeating_key(data, op="xor"|"add"|
+  "sub")` shares one period search, one scoring function and one verification path, while
+  `repeating_key_xor` remains a wrapper. This closes the missing "+/- mod 256" family.
+
+### Tests
+
+248 tests, all green.
+
 ## 0.2.0b1 — 2026-10-03 (beta)
 
 First beta. Everything below was developed, reviewed and tested in a single day of

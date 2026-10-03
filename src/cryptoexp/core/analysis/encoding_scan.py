@@ -65,12 +65,13 @@ def analyze_encoding(ctx: dict, max_blobs: int = 20, effort: str = "normal") -> 
                           for c in chain[:3]]
         for rank, c in enumerate(chain[:2]):
             # Top candidate only: that is E.confidence_of's highest tier
-            # (flag hit or very high score)
+            # (a strict flag hit; a score alone now caps at medium)
             if c["flags"] or rank == 0:
                 out["candidates"].append({
                     "attack": "decode_chain:" + "→".join(c["steps"]),
                     "data": c["data"], "confidence": c["confidence"],
-                    "detail": f"score {c['score']} ({blob['source']})",
+                    "detail": f"score {c['score']} ({blob['source']})"
+                              + (f" ({c['note']})" if c.get("note") else ""),
                 })
                 solved = solved or bool(c["flags"])
 
@@ -95,7 +96,8 @@ def analyze_encoding(ctx: dict, max_blobs: int = 20, effort: str = "normal") -> 
                 out["candidates"].append({
                     "attack": "single_byte_xor", "data": best["plaintext"],
                     "confidence": best["confidence"],
-                    "detail": f"key=0x{best['key']:02x}, score {best['score']} ({label})",
+                    "detail": f"key=0x{best['key']:02x}, score {best['score']} ({label})"
+                              + (f" ({best['note']})" if best.get("note") else ""),
                 })
                 solved = solved or bool(best["flags"])
 
@@ -117,7 +119,8 @@ def analyze_encoding(ctx: dict, max_blobs: int = 20, effort: str = "normal") -> 
                             "attack": "repeating_key_xor", "data": top["plaintext"],
                             "confidence": top["confidence"],
                             "detail": f"keylen={top['keysize']} key={top['key']!r} "
-                                      f"score {top['score']}",
+                                      f"score {top['score']}"
+                                      + (f" ({top['note']})" if top.get("note") else ""),
                         })
                         solved = solved or bool(top["flags"])
         out["blobs"].append(entry)

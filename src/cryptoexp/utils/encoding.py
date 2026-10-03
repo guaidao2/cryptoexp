@@ -354,13 +354,45 @@ def score_text(data, flag_bonus: bool = True) -> float:
 
 
 def confidence_of(score: float, has_flag: bool = False) -> str:
+    """Confidence tier of a candidate - "high" requires a known flag prefix
+
+    A text score alone never earns "high". The score is a heuristic over an alphabet
+    and a small dictionary, so it is routinely high on a *wrong* key: a repeated-key
+    mod-256 addition challenge came back
+
+        keysize=12, score=102.53, confidence='high'
+
+    with a garbage plaintext, while `analyze` on the same data was careful ("no strong
+    verification yet") - the two layers disagreed about the same candidate. Reserving
+    "high" for a strict flag-prefix match makes the library's per-candidate confidence
+    agree with what verification concludes, and `confidence_note(data)` supplies the
+    reason to show next to a capped candidate.
+    """
     if has_flag:
         return "high"
-    if score >= 85:
-        return "high"
+    # A score at or above the old "high" threshold (85) is still only a heuristic
+    # without a known prefix, so the whole score range caps at medium on purpose.
     if score >= 60:
         return "medium"
     return "low"
+
+
+def confidence_note(data, flags=None) -> str:
+    """Why a candidate is not "high" - the known-prefix check and what it found
+
+    Empty string when the data does match a known prefix. Reuses the wording the
+    verification layer already prints for a loose flag shape, so a user reading the
+    library output and the report sees one sentence, not two dialects.
+    """
+    if isinstance(data, str):
+        data = data.encode('utf-8', errors='replace')
+    if flags is None:
+        flags = flag_candidates(data)
+    if flags:
+        return ""
+    if loose_flag_candidates(data):
+        return "flag-like shape but prefix not in the known list"
+    return "no known flag prefix matched: a text score alone is not high confidence"
 
 
 # ────────────────────────── single-layer decoders ──────────────────────────
@@ -550,6 +582,7 @@ def decode_chain(blob: str, max_layers: int = 3, min_score: float = 55.0):
                     "score": round(sc, 2),
                     "flags": flags,
                     "confidence": confidence_of(sc, bool(flags)),
+                    "note": confidence_note(out, flags),
                 })
                 if sc >= min_score:
                     try:
@@ -563,39 +596,120 @@ def decode_chain(blob: str, max_layers: int = 3, min_score: float = 55.0):
     return results
 
 
-# ────────────────────────── XOR ──────────────────────────
+# -------------------------- repeated-key byte ciphers --------------------------
 
-def single_byte_xor(data: bytes, top: int = 5):
-    """Single-byte XOR brute force → top candidates sorted by plaintext score"""
+# The one-byte-wide operations the repeated-key search understands:
+#   xor: plaintext = ciphertext ^ key          (the classic)
+#   add: ciphertext = plaintext + key mod 256  (a common variant, no XOR anywhere)
+#   sub: ciphertext = plaintext - key mod 256
+# `+`/`-` mod 256 are their own family: a Vigenere solver works on an alphabet, and
+# nothing here handled a byte-wise shift at all until a user asked for it.
+_OPS = ("xor", "add", "sub")
+
+
+def _byte_table(k: int, op: str) -> bytes:
+    """Ciphertext byte -> plaintext byte, for one key byte (a translate table)"""
+    if op == "xor":
+        return bytes(b ^ k for b in range(256))
+    if op == "add":
+        return bytes((b - k) % 256 for b in range(256))
+    return bytes((b + k) % 256 for b in range(256))
+
+
+def _check_op(op):
+    if op not in _OPS:
+        raise ValueError("op must be one of %s" % (", ".join(_OPS),))
+    return op
+
+
+def single_byte_op(data: bytes, op: str = "xor", top: int = 5):
+    """Single-byte brute force for one byte operation -> top candidates by score
+
+    One implementation for xor/add/sub (see `_OPS`): the loop is identical, only the
+    byte table changes. `single_byte_xor` is the xor spelling of this call.
+    """
+    _check_op(op)
     out = []
     for k in range(256):
-        pt = bytes(b ^ k for b in data)
+        pt = bytes(data).translate(_byte_table(k, op))
         sc = score_text(pt)
         out.append({"key": k, "plaintext": pt, "score": round(sc, 2),
                     "flags": flag_candidates(pt)})
     out.sort(key=lambda r: (bool(r["flags"]), r["score"]), reverse=True)
+    # Confidence and its reason are only computed for the returned candidates: this
+    # loop is the inner loop of `repeating_key` (256 keys per column), and the note
+    # costs two extra regex scans per key.
     for r in out[:top]:
         r["confidence"] = confidence_of(r["score"], bool(r["flags"]))
+        r["note"] = confidence_note(r["plaintext"], r["flags"])
     return out[:top]
+
+
+def single_byte_xor(data: bytes, top: int = 5):
+    """Single-byte XOR brute force -> top candidates sorted by plaintext score"""
+    return single_byte_op(data, "xor", top)
 
 
 def _hamming(a: bytes, b: bytes) -> int:
     return sum(bin(x ^ y).count('1') for x, y in zip(a, b))
 
 
-def _key_plaintext(data: bytes, key: bytes) -> bytes:
+def _key_plaintext(data: bytes, key: bytes, op: str = "xor") -> bytes:
     """Fast decryption (bytes.translate via the C layer — coordinate ascent
     calls this hundreds of thousands of times)"""
     ks = len(key)
     out = bytearray(len(data))
     for i in range(ks):
-        table = bytes(b ^ key[i] for b in range(256))
-        out[i::ks] = data[i::ks].translate(table)
+        out[i::ks] = data[i::ks].translate(_byte_table(key[i], op))
     return bytes(out)
 
 
+def _period_scores(data: bytes, min_ks: int, max_ks: int, op: str):
+    """(distance, keysize) for every candidate length, smallest distance first
+
+    xor keeps the textbook statistic: the normalised Hamming distance between
+    consecutive blocks of the assumed length (the key cancels under XOR). For add/sub
+    a block comparison in XOR space is meaningless, because the key does not cancel
+    there; instead every byte is compared with the byte `ks` further on through the
+    key-free byte difference, which *does* cancel it either way:
+
+        (p[i] +- k) - (p[j] +- k) == p[i] - p[j]   (mod 256)
+
+    The statistic is how CONCENTRATED that difference distribution is (the sum of the
+    squared bucket shares, negated so that "smaller first" still holds). At the true
+    length the differences are the plaintext's own, which take a limited set of values;
+    at a wrong length a near-uniform key difference is mixed in and flattens the
+    distribution. Measured on 240 random add/sub challenges (plaintext 64-126 bytes,
+    keys 3-11 bytes, max_ks 16 and 40): the true length lands in the top-4 shortlist
+    230/240 times, against 202/240 for a mean-absolute-difference variant and 32nd of
+    39 for a Hamming comparison of the same blocks. One shortlist, one ordering, three
+    operations.
+    """
+    scored = []
+    for ks in range(min_ks, min(max_ks, len(data) // 2) + 1):
+        if op == "xor":
+            blocks = [data[i * ks:(i + 1) * ks]
+                      for i in range(min(8, len(data) // ks))]
+            if len(blocks) < 2:
+                continue
+            diffs = [_hamming(blocks[i], blocks[i + 1]) / ks
+                     for i in range(len(blocks) - 1)]
+            scored.append((sum(diffs) / len(diffs), ks))
+            continue
+        if len(data) - ks < ks:
+            continue
+        counts = {}
+        for i in range(len(data) - ks):
+            d = (data[i + ks] - data[i]) % 256
+            counts[d] = counts.get(d, 0) + 1
+        total = len(data) - ks
+        scored.append((-sum(v * v for v in counts.values()) / total, ks))
+    scored.sort()
+    return scored
+
+
 def _refine_key(data: bytes, key: bytes, cand_lists=None, passes: int = 2,
-                restarts: int = 2, seed: int = 0x43525950):
+                restarts: int = 2, seed: int = 0x43525950, op: str = "xor"):
     """Coordinate-ascent key search: re-pick every column's byte using the
     **score of the whole plaintext**
 
@@ -609,6 +723,9 @@ def _refine_key(data: bytes, key: bytes, cand_lists=None, passes: int = 2,
     challenge would not fall at all (we hit this in testing). So we would rather
     spend the compute here, and save time by stopping early on a strict flag hit
     instead of trimming the space with a candidate list.
+
+    The objective is `score_text(..., flag_bonus=False)` on purpose: a flag bonus in
+    the search objective lets hill climbing fabricate a flag-shaped plaintext.
     """
     import random
     rng = random.Random(seed)
@@ -620,10 +737,10 @@ def _refine_key(data: bytes, key: bytes, cand_lists=None, passes: int = 2,
         starts.append(bytes(rng.choice(list(space[i])) for i in range(ks)))
 
     best_key = bytes(key)
-    best_score = score_text(_key_plaintext(data, best_key), flag_bonus=False)
+    best_score = score_text(_key_plaintext(data, best_key, op), flag_bonus=False)
     for start in starts:
         cur = bytearray(start)
-        cur_score = score_text(_key_plaintext(data, bytes(cur)), flag_bonus=False)
+        cur_score = score_text(_key_plaintext(data, bytes(cur), op), flag_bonus=False)
         for _ in range(passes):
             changed = False
             for i in range(ks):
@@ -633,7 +750,7 @@ def _refine_key(data: bytes, key: bytes, cand_lists=None, passes: int = 2,
                     if g == orig:
                         continue
                     cur[i] = g
-                    sc = score_text(_key_plaintext(data, bytes(cur)), flag_bonus=False)
+                    sc = score_text(_key_plaintext(data, bytes(cur), op), flag_bonus=False)
                     if sc > local_score + 0.01:
                         local_best, local_score = g, sc
                 cur[i] = local_best
@@ -646,33 +763,49 @@ def _refine_key(data: bytes, key: bytes, cand_lists=None, passes: int = 2,
     return best_key, best_score
 
 
-def repeating_key_xor(data: bytes, min_ks: int = 2, max_ks: int = 40,
-                      top_keysizes: int = 4, top: int = 5,
-                      restarts: int = 2, passes: int = 2,
-                      dist_slack: float = 0.75, early_stop: bool = True):
-    """Repeating-key XOR: Hamming shortlist → per-column brute force → whole-text
-    score hill climb → rank by score
+def repeating_key(data: bytes, op: str = "xor", min_ks: int = 2, max_ks: int = 40,
+                  top_keysizes: int = 4, top: int = 5,
+                  restarts: int = 2, passes: int = 2,
+                  dist_slack: float = 0.75, early_stop: bool = True):
+    """Repeated-key byte cipher: key-length shortlist -> per-column brute force ->
+    whole-text score hill climb -> rank by score
 
     All four steps produce candidates first and verify after; no single
     heuristic draws the conclusion:
-      1) key length: take a **shortlist** by normalised Hamming distance (not
+      1) key length: take a **shortlist** by the key-cancelled block distance (not
          only the winner — the correct length often ranks 4th in practice, and
          taking just top1 gets it wrong)
-      2) initial key: per-column single-byte brute force
+      2) initial key: per-column single-byte brute force, same `op`
       3) refinement: multi-start hill climb on the whole-plaintext score (full
          256 space)
       4) ranking / early stop: a strict flag hit comes first, then the
          whole-text score; once one hits, no other length is tried
+
+    `op` selects the one-byte-wide operation; everything else is shared - one period
+    search (`_period_scores`), one scoring function, one verification path:
+
+        xor (default): plaintext = ciphertext ^ key
+        add:           ciphertext = plaintext + key (mod 256)
+        sub:           ciphertext = plaintext - key (mod 256)
+
+    `add`/`sub` are a common challenge variant and had no solver at all before: the
+    library only had the XOR search and the alphabet-only `vigenere_recover`.
+
+    House rule kept: **no search objective here contains a flag bonus**. The hill
+    climb scores with `flag_bonus=False`, because a bonus in the objective lets it
+    fabricate a flag-shaped plaintext instead of decrypting one. A real flag found on
+    the way is a by-product, reported in `flags` and used for ranking only.
+
+    `confidence` is "high" only when a known flag prefix matched; a score alone caps
+    at "medium", with the reason in the `note` field (`confidence_note`).
+
+    Returns, per candidate: {"keysize", "key", "plaintext", "op", "distance", "score",
+    "flags", "confidence", "note", "search"}.
     """
+    _check_op(op)
     if len(data) < min_ks * 4:
         return []
-    scored = []
-    for ks in range(min_ks, min(max_ks, len(data) // 2) + 1):
-        blocks = [data[i * ks:(i + 1) * ks] for i in range(min(8, len(data) // ks))]
-        if len(blocks) < 2:
-            continue
-        dists = [_hamming(blocks[i], blocks[i + 1]) / ks for i in range(len(blocks) - 1)]
-        scored.append((sum(dists) / len(dists), ks))
+    scored = _period_scores(data, min_ks, max_ks, op)
     if not scored:
         return []
     scored.sort()
@@ -691,20 +824,21 @@ def repeating_key_xor(data: bytes, min_ks: int = 2, max_ks: int = 40,
         cand_lists = []
         for col in range(ks):
             column = bytes(data[i] for i in range(col, len(data), ks))
-            tops = single_byte_xor(column, top=8)
+            tops = single_byte_op(column, op, top=8)
             cand_lists.append([t["key"] for t in tops])
             key.append(tops[0]["key"])
         # try the fast "top 8 per column" pass first; only if that fails, open
         # up the full 256 space (saves time without losing solutions)
         for space in (cand_lists, None):
             k, sc = _refine_key(data, bytes(key), space, passes=passes,
-                                restarts=restarts if space is None else 1)
-            pt = _key_plaintext(data, k)
+                                restarts=restarts if space is None else 1, op=op)
+            pt = _key_plaintext(data, k, op)
             flags = flag_candidates(pt)
-            out.append({"keysize": ks, "key": k, "plaintext": pt,
+            out.append({"keysize": ks, "key": k, "plaintext": pt, "op": op,
                         "distance": round(dist, 4), "score": round(sc, 2),
                         "flags": flags,
                         "confidence": confidence_of(sc, bool(flags)),
+                        "note": confidence_note(pt, flags),
                         "search": "local candidates" if space else "full space"})
             if flags:
                 break
@@ -714,6 +848,20 @@ def repeating_key_xor(data: bytes, min_ks: int = 2, max_ks: int = 40,
     return out[:top]
 
 
+def repeating_key_xor(data: bytes, min_ks: int = 2, max_ks: int = 40,
+                      top_keysizes: int = 4, top: int = 5,
+                      restarts: int = 2, passes: int = 2,
+                      dist_slack: float = 0.75, early_stop: bool = True):
+    """Repeating-key XOR - the xor spelling of `repeating_key`, kept as a wrapper
+
+    Same signature and same result as before the `op` parameter existed, so callers
+    written against this name keep working unchanged.
+    """
+    return repeating_key(data, "xor", min_ks=min_ks, max_ks=max_ks,
+                         top_keysizes=top_keysizes, top=top, restarts=restarts,
+                         passes=passes, dist_slack=dist_slack, early_stop=early_stop)
+
+
 # ────────────────────────── classical cipher brute force ──────────────────────────
 
 def caesar_candidates(text: str, top: int = 5):
@@ -721,9 +869,11 @@ def caesar_candidates(text: str, top: int = 5):
     for shift in range(1, 26):
         pt = caesar(text, shift)
         sc = score_text(pt)
+        flags = flag_candidates(pt.encode())
         out.append({"shift": shift, "plaintext": pt, "score": round(sc, 2),
-                    "flags": flag_candidates(pt.encode()),
-                    "confidence": confidence_of(sc, bool(flag_candidates(pt.encode())))})
+                    "flags": flags,
+                    "confidence": confidence_of(sc, bool(flags)),
+                    "note": confidence_note(pt.encode(), flags)})
     out.sort(key=lambda r: (bool(r["flags"]), r["score"]), reverse=True)
     return out[:top]
 
@@ -740,7 +890,8 @@ def affine_candidates(text: str, top: int = 5):
             flags = flag_candidates(pt.encode())
             out.append({"a": a, "b": b, "plaintext": pt, "score": round(sc, 2),
                         "flags": flags,
-                        "confidence": confidence_of(sc, bool(flags))})
+                        "confidence": confidence_of(sc, bool(flags)),
+                        "note": confidence_note(pt.encode(), flags)})
     out.sort(key=lambda r: (bool(r["flags"]), r["score"]), reverse=True)
     return out[:top]
 
@@ -850,7 +1001,8 @@ def vigenere_recover(text: str, max_keylen: int = 20, top: int = 5):
         flags = flag_candidates(pt.encode())
         out.append({"key": key, "keylen": period, "ioc": round(ioc, 4),
                     "plaintext": pt, "score": round(sc, 2), "flags": flags,
-                    "confidence": confidence_of(sc, bool(flags))})
+                    "confidence": confidence_of(sc, bool(flags)),
+                    "note": confidence_note(pt.encode(), flags)})
     seen, uniq = set(), []
     # Rank by (strict flag, score, then SHORTEST key). A longer key has more free
     # parameters and can overfit the heuristic score, so key length is charged for.
@@ -872,7 +1024,8 @@ def fence_candidates(text: str, max_rails: int = 8, top: int = 5):
         flags = flag_candidates(pt.encode())
         out.append({"rails": rails, "plaintext": pt, "score": round(sc, 2),
                     "flags": flags,
-                    "confidence": confidence_of(sc, bool(flags))})
+                    "confidence": confidence_of(sc, bool(flags)),
+                    "note": confidence_note(pt.encode(), flags)})
     out.sort(key=lambda r: (bool(r["flags"]), r["score"]), reverse=True)
     return out[:top]
 

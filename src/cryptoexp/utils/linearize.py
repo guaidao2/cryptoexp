@@ -84,7 +84,8 @@ What this deliberately does NOT do (measured, not assumed):
     a short vector satisfying the equations may be sitting in `vectors`.
 
 Measured range (this machine, CPython 3.11, the pure-Python Fraction LLL of `.lattice`, which
-refuses any shape above 12 rows or 12 columns - that cap is the real limit):
+refuses any shape above 12 rows or 12 columns - see the time ceiling below for what that cap
+really buys):
   * Fully determined linear system in n unknowns with a known small solution, n equations,
     128-bit and 1024-bit moduli (lattice = (2n-1) x (2n-1)):
       n=2 dim  5 -> 0.01 s      n=3 dim  7 -> 0.09 / 0.12 s     n=4 dim  9 -> 0.55 / 0.70 s
@@ -97,6 +98,20 @@ refuses any shape above 12 rows or 12 columns - that cap is the real limit):
     range for the module as a whole (including the linear analysis) is well below that in
     time; the refusals above the cap come back as ok=False with the reason, never as a
     half-finished reduction.
+  * THE CAP IS NOT THE CEILING - TIME IS, and `effort` is what buys it. The same
+    "2 variables, 2 equations" system is a 5x5 lattice at effort='light' and a 12x12
+    relaxation at effort='normal', and the 12x12 one is what costs minutes (one rung,
+    measured through the single-attempt path):
+      1024-bit modulus, 64-bit bounds:  light 0.01 s  |  normal  20.7 s
+      2048-bit modulus, 64-bit bounds:  light 0.01 s  |  normal  24.4 s
+      2048-bit modulus, 128-bit bounds: light 0.02 s  |  normal  66.1 s
+      4096-bit modulus, 128-bit bounds: light 0.03 s  |  normal  82.2 s
+    A user's shape went further still: the 11x11 `normal` lattice sat on the LLL internal
+    step guard for 104 s and returned None, while `light` answered it in 1.4 s. `linearize`
+    therefore walks the effort ladder CHEAPEST FIRST and stops at the first verified answer
+    (see `_EFFORT_LADDER`), and the note names the level that answered. With the ladder the
+    public call on all four rows above returns in 0.01-0.02 s. Numbers are this machine,
+    CPython 3.11, no optional accelerators in the path.
 
 Pure standard library; the modulus arithmetic, gcds and the integer roots come from
 `.algebra`, the reduction from `.lattice`.
@@ -138,6 +153,21 @@ _WEIGHT_SCALE = 8
 _MAX_PROBES = 4
 _PROBE_COEFFS = (1, -1, 2, -2)
 _EFFORTS = ("light", "normal", "heavy")
+# Cheap stage first, applied automatically instead of left to the caller. A `normal` run
+# builds a much bigger relaxation than `light` (measured: an 11x11 lattice against a 5x5 one
+# on "2 variables, 2 equations"), and that bigger lattice is what eats the time: 85.8 s
+# against 0.53 s at a 4096-bit modulus, and a user's shape sat on the LLL step guard for
+# 104 s at `normal` while `light` solved it in 1.4 s and returned None. So the ladder runs
+# CHEAPEST FIRST and stops at the first verified answer - the same "cheap stage first" order
+# as `common_d_attack` - which is what keeps the call at seconds instead of minutes. That
+# also means no downward retry is ever needed: a cheaper level has already been tried (and
+# its outcome recorded) before a more expensive one is built.
+_EFFORT_LADDER = {"light": ("light",),
+                  "normal": ("light", "normal"),
+                  "heavy": ("light", "normal", "heavy")}
+# Failure kinds that the note phrases specially (the shape ones are why the ladder exists).
+_HIT_PHRASE = {"cap": "was over the lattice cap",
+               "guard": "hit the LLL step guard"}
 # The combination of several moduli is done by scaling each equation to the common lcm; if
 # that lcm explodes the linear analysis is skipped rather than done with absurd entries.
 _MAX_COMMON_MODULUS_BITS = 8192
@@ -921,54 +951,21 @@ def _probe_family(eqs, assignment, directions, columns, bnd):
 
 # ---- the public entry points -------------------------------------------------------
 
-def linearize(equations, bounds, extra_monomials=None, effort="normal"):
-    """Build the linearisation lattice, reduce it, and read the small monomial values off
+def _linearize_once(equations, bounds, extra_monomials=None, effort="normal"):
+    """One attempt at `linearize` with exactly the effort given (see `linearize`)
 
-    Args:
-        equations: sequence of {"terms": {monomial: coeff}, "mod": m, "rhs": r}; "mod" 0 or
-                   None means an exact equality over Z (see the module docstring for the
-                   monomial spelling).
-        bounds: {monomial: bound} with |value| <= bound for every monomial of the equations.
-                   A product bound may be omitted when the single variables are bounded.
-        extra_monomials: additional monomials for the shift set - every equation is also
-                   multiplied by each of them (they must be boundable).
-        effort: "light" (no shifts), "normal" (x every equation), "heavy" (also products of
-                   two variables). Shifts that do not fit the 12x12 pure-Python LLL cap are
-                   skipped and the note says so.
-    Returns:
-        {"ok", "monomial_values", "solution", "vectors", "dimension", "detail", "note",
-         "seconds"}:
-          ok            True only when every variable has a value that `check_solution`
-                        accepted.
-          monomial_values  {monomial: value} - the values the lattice actually read off, the
-                        congruences proved, or exact arithmetic derived from them. May be a
-                        PARTIAL dict when ok is False (e.g. x*y is known but x and y are
-                        not); None when nothing could be read.
-          solution      {variable: value} for every variable of the system, else None.
-          vectors       one entry per non-zero reduced vector:
-                        {"monomial_values", "residual_zero", "norm", "solution",
-                         "verified", "note"} - the raw material, so a caller who wants to
-                        read the lattice itself still can.
-          dimension     number of lattice coordinates (monomial columns + equation columns).
-          detail        lattice shape, parameters and timings.
-          note          why the result is what it is; on failure it names the reason and the
-                        direction to widen.
-          seconds       wall-clock time of the call.
-        Nothing in this dict is ever a guess: `monomial_values` entries come from a vector
-        with exactly zero residuals, from a proven determination, or from exact arithmetic on
-        those; every `solution` entry was substituted back through `check_solution`.
-        The determination analysis runs PER MODULUS and is glued with CRT, so a value that
-        only the combination of two different moduli pins down is not proven here (it can
-        still arrive through the verified-candidate path, labelled as not proven unique).
+    Kept separate so the effort ladder in `linearize` can retry cheaper without
+    re-validating or re-normalising anything twice.
     """
     t0 = time.time()
     out = {"ok": False, "monomial_values": None, "solution": None, "vectors": [],
-           "dimension": 0, "detail": "", "note": "", "seconds": 0.0}
+           "dimension": 0, "detail": "", "note": "", "seconds": 0.0, "_hit": "other"}
 
-    def _fail(note, detail=""):
+    def _fail(note, detail="", hit="other"):
         out["note"] = note
         if detail:
             out["detail"] = detail
+        out["_hit"] = hit
         out["seconds"] = round(time.time() - t0, 3)
         return out
 
@@ -1019,7 +1016,8 @@ def linearize(equations, bounds, extra_monomials=None, effort="normal"):
         out["dimension"] = cols
         return _fail("the base system alone is %d rows x %d columns, over the pure-Python "
                      "LLL cap of %d: reduce the number of equations or monomials"
-                     % (rows, cols, _LLL_MAX_DIM), "lattice %dx%d" % (rows, cols))
+                     % (rows, cols, _LLL_MAX_DIM), "base system %dx%d, cap %d"
+                     % (rows, cols, _LLL_MAX_DIM), "cap")
     if not work:
         return _fail("no equation carries information after shifts")
     n_mono = len(monos)
@@ -1040,7 +1038,9 @@ def linearize(equations, bounds, extra_monomials=None, effort="normal"):
     if red is None:
         return _fail("the pure-Python LLL refused the %d x %d lattice (cap %d): lower the "
                      "effort, drop equations or shrink the monomial set"
-                     % (len(basis), dimension, _LLL_MAX_DIM))
+                     % (len(basis), dimension, _LLL_MAX_DIM),
+                     "lattice %dx%d, LLL %.1fs" % (len(basis), dimension, lll_seconds),
+                     "guard")
 
     # ---- read the reduced vectors ------------------------------------------------------
     vectors = []
@@ -1239,7 +1239,119 @@ def linearize(equations, bounds, extra_monomials=None, effort="normal"):
                             dropped_unbounded))
     out["note"] = " | ".join([linear_note] + [n for n in notes if n])
     out["seconds"] = round(time.time() - t0, 3)
+    out["_hit"] = "" if solution is not None else "other"
     return out
+
+
+def _attempt_line(level, hit, res):
+    """One "what this effort hit" fragment for the note"""
+    if hit == "other":
+        # No shape failure: quote the attempt's own first reason (the lattice detail and
+        # the "what to widen" sentence stay in `detail` / the final note).
+        return "effort='%s' %s" % (level, (res.get("note")
+                                           or "no accepted solution").split(" | ")[0])
+    detail = (res.get("detail") or "").strip()
+    if len(detail) > 70:
+        detail = detail[:67] + "..."
+    return "effort='%s' %s%s" % (level, _HIT_PHRASE[hit],
+                                 " (%s)" % detail if detail else "")
+
+
+def linearize(equations, bounds, extra_monomials=None, effort="normal"):
+    """Build the linearisation lattice, reduce it, and read the small monomial values off
+
+    Args:
+        equations: sequence of {"terms": {monomial: coeff}, "mod": m, "rhs": r}; "mod" 0 or
+                   None means an exact equality over Z (see the module docstring for the
+                   monomial spelling).
+        bounds: {monomial: bound} with |value| <= bound for every monomial of the equations.
+                   A product bound may be omitted when the single variables are bounded.
+        extra_monomials: additional monomials for the shift set - every equation is also
+                   multiplied by each of them (they must be boundable).
+        effort: "light" (no shifts), "normal" (x every equation), "heavy" (also products of
+                   two variables). Shifts that do not fit the 12x12 pure-Python LLL cap are
+                   skipped and the detail says so. `effort` is a CEILING, not a promise: the
+                   levels are tried cheapest first and the first verified answer wins
+                   (`_EFFORT_LADDER`), because a `normal` relaxation is the expensive one and
+                   the cheap one usually carries the information. The note names the level
+                   that answered, and on failure what each attempt hit.
+    Returns:
+        {"ok", "monomial_values", "solution", "vectors", "dimension", "detail", "note",
+         "effort", "seconds"}:
+          ok            True only when every variable has a value that `check_solution`
+                        accepted.
+          monomial_values  {monomial: value} - the values the lattice actually read off, the
+                        congruences proved, or exact arithmetic derived from them. May be a
+                        PARTIAL dict when ok is False (e.g. x*y is known but x and y are
+                        not); None when nothing could be read.
+          solution      {variable: value} for every variable of the system, else None.
+          vectors       one entry per non-zero reduced vector:
+                        {"monomial_values", "residual_zero", "norm", "solution",
+                         "verified", "note"} - the raw material, so a caller who wants to
+                        read the lattice itself still can.
+          dimension     number of lattice coordinates (monomial columns + equation columns).
+          detail        lattice shape, parameters and timings.
+          effort        the effort level that produced this result (the cheap level that
+                        answered, which may be below the one requested), or the requested
+                        one on a full failure.
+          note          why the result is what it is; on failure it names the reason and the
+                        direction to widen, plus what each attempt hit. On a cheap-level
+                        answer it names the level that worked and what the cheaper attempts
+                        before it hit.
+          seconds       wall-clock time of the WHOLE call, every attempt included.
+        Nothing in this dict is ever a guess: `monomial_values` entries come from a vector
+        with exactly zero residuals, from a proven determination, or from exact arithmetic on
+        those; every `solution` entry was substituted back through `check_solution`.
+        The determination analysis runs PER MODULUS and is glued with CRT, so a value that
+        only the combination of two different moduli pins down is not proven here (it can
+        still arrive through the verified-candidate path, labelled as not proven unique).
+
+    Measured ceiling (this machine, CPython 3.11, the pure-Python Fraction LLL of
+    `.lattice`). The 12-coordinate cap is not the real limit - time is. Raw cost of one
+    rung, measured through the single-attempt path on "2 variables, 2 equations, modulus
+    M, bound B" (5x5 at effort='light', 12x12 at effort='normal'):
+
+        M 1024-bit, B 2^64:   light  0.01 s  (5x5)  |  normal  20.7 s  (12x12)
+        M 2048-bit, B 2^64:   light  0.01 s  (5x5)  |  normal  24.4 s  (12x12)
+        M 2048-bit, B 2^128:  light  0.02 s  (5x5)  |  normal  66.1 s  (12x12)
+        M 4096-bit, B 2^128:  light  0.03 s  (5x5)  |  normal  82.2 s  (12x12)
+
+    A user hit exactly this: `effort="normal"` built an 11x11 lattice, sat on the LLL
+    step guard for 104 s and returned None, while `effort="light"` solved the same shape in
+    1.4 s. With the ladder, the public call on all four rows above returns in 0.01-0.02 s,
+    because the light rung answers first and the 12x12 relaxation is never built. That is
+    the whole point: read `note` for the level that answered and `detail` for the lattice
+    actually built.
+    """
+    if effort not in _EFFORTS:
+        res = _linearize_once(equations, bounds, extra_monomials, effort)
+        res.pop("_hit", None)
+        res["effort"] = effort
+        return res
+    t0 = time.time()
+    attempts = []
+    for level in _EFFORT_LADDER[effort]:
+        res = _linearize_once(equations, bounds, extra_monomials, level)
+        hit = res.pop("_hit", "other")
+        attempts.append((level, hit, res))
+        res["effort"] = level
+        res["seconds"] = round(time.time() - t0, 3)
+        if res["ok"]:
+            if level != effort:
+                # Name the level that answered, and what the cheaper attempts before it
+                # hit when there were any (there are none when `level` is the first rung).
+                before = ("; before it, " + "; ".join(_attempt_line(lv, h, r)
+                                                      for lv, h, r in attempts[:-1])
+                          if len(attempts) > 1 else "")
+                res["note"] = (res["note"] + " | " if res["note"] else "") + \
+                    "solved at effort='%s', below the requested effort='%s'%s" \
+                    % (level, effort, before)
+            return res
+    last = attempts[-1][2]
+    last["note"] = (last["note"] + " | " if last["note"] else "") + \
+        "efforts tried (cheapest first): " + \
+        "; ".join(_attempt_line(lv, h, r) for lv, h, r in attempts)
+    return last
 
 
 def _describe_failures(failures):

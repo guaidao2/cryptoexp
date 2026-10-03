@@ -240,8 +240,38 @@ def broadcast_attack(e: int, pairs):
     return _res(True, plaintext=itob(root), detail=f"{e} pairs CRT'd, integer root succeeded")
 
 
+def _bezout_power(c, k, n, name):
+    """c^k mod n for a Bezout coefficient k (a negative k uses the modular inverse)
+
+    Returns (value, "") or (None, reason). A negative exponent with a ciphertext that
+    is *not* invertible used to crash inside `pow(None, ...)`; the gcd of that
+    ciphertext with n is itself a factorisation, so it is named instead.
+    """
+    if k == 0:
+        return 1, ""
+    if k > 0:
+        return pow(c, k, n), ""
+    inv = A.modinv(c, n)
+    if inv is None:
+        return None, (f"{name} is not coprime with n (gcd={A.gcd(c, n)}), and that gcd "
+                      f"factors n - factor n and decrypt directly")
+    return pow(inv, -k, n), ""
+
+
 def common_modulus_attack(n, e1, c1, e2, c2):
-    """Same modulus, different exponents (gcd(e1,e2)=1): m = c1^a * c2^b mod n
+    """Same modulus, different exponents: m from c1^a * c2^b mod n
+
+    Bezout gives a*e1 + b*e2 = g with g = gcd(e1, e2), hence
+
+        c1^a * c2^b == m^(a*e1) * m^(b*e2) == m^g   (mod n)
+
+    With g == 1 the right-hand side is m itself (the textbook common-modulus attack).
+    With g > 1 only m^g mod n is obtainable - but that is not a dead end: when
+    m^g < n there was no reduction, the exact integer g-th root is m, and
+    re-encryption confirms it. That is the same family as Hastad / low-exponent, and
+    the old "gcd(e1,e2) > 1, needs factorisation first" note was simply wrong: it threw
+    away gcd = 2 with a short message (reported by a user, 2026-10-04). Only when
+    m^g >= n is the root genuinely ambiguous, and then the note says so.
 
     The recovered message is delivered as result["plaintext"] (bytes), not as the
     integer m - reading the line above as "returns an int" is a known trap.
@@ -249,21 +279,32 @@ def common_modulus_attack(n, e1, c1, e2, c2):
              "d", "note"}; the answer, when there is one, is result["plaintext"]
              (bytes), or result["factors"] / result["d"] for the factor attacks.
     """
+    if e1 <= 0 or e2 <= 0:
+        return _res(False, note="exponents must be positive")
     g, a, b = A.egcd(e1, e2)
-    if g != 1:
-        return _res(False, note=f"gcd(e1,e2)={g} ≠ 1, needs factorisation first")
-    if a < 0:
-        inv = A.modinv(c1, n)
-        if inv is None:
-            return _res(False, note="c1 is not coprime with n — a plain gcd factors n")
-        part1 = pow(inv, -a, n)
-    else:
-        part1 = pow(c1, a, n)
-    part2 = pow(c2, b, n) if b >= 0 else pow(A.modinv(c2, n), -b, n)
-    m = part1 * part2 % n
-    if not reencrypt_check(m, e1, n, c1):
-        return _res(False, note="recovered m failed the re-encryption check")
-    return _res(True, plaintext=itob(m), detail="common modulus attack")
+    part1, why = _bezout_power(c1, a, n, "c1")
+    if part1 is None:
+        return _res(False, note=why)
+    part2, why = _bezout_power(c2, b, n, "c2")
+    if part2 is None:
+        return _res(False, note=why)
+    m_g = part1 * part2 % n
+    if g == 1:
+        if not reencrypt_check(m_g, e1, n, c1):
+            return _res(False, note="recovered m failed the re-encryption check")
+        return _res(True, plaintext=itob(m_g), detail="common modulus attack")
+    # g > 1: m^g mod n is what Bezout hands over. If that residue has an exact g-th
+    # root which re-encrypts to BOTH ciphertexts, it is the message; otherwise the
+    # residue was reduced and the root is not determined.
+    root, exact = A.iroot(m_g, g)
+    if exact and root > 1 and reencrypt_check(root, e1, n, c1) \
+            and reencrypt_check(root, e2, n, c2):
+        return _res(True, plaintext=itob(root),
+                    detail=f"common modulus attack, gcd(e1,e2)={g}: exact {g}-th root of "
+                           f"m^{g} mod n (m^{g} < n, so nothing was reduced)")
+    return _res(False, note=f"gcd(e1,e2)={g}>1: only m^g mod n is obtainable; m^g >= n "
+                            f"so the root is ambiguous - needs factorisation or another "
+                            f"route")
 
 
 def shared_prime_attack(pairs):

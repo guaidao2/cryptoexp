@@ -244,9 +244,24 @@ parsing, weak-PRNG identification) on constructed real-world material.
 `tests/test_audit_regressions.py` pins every defect two independent audits found, so the
 wrong formulas and silently-misleading docstrings cannot come back.
 
-Current total: **172 tests, all green** (`python -m unittest discover -s tests`).
+Current total: **248 tests, all green** (`python -m unittest discover -s tests`).
 
 ---
+
+## API stability
+
+`0.2.0` is the first non-preview release, so here is what that means in plain terms.
+
+- **Stable**: the primitives, the analyzers, the CLI, the JSON schema and the result-dict
+  contract. These names and semantics will not change without a documented deprecation.
+- **Experimental, with measured limits**: the newest lattice work - `coppersmith_bivariate`
+  and `known_high_bits_two_primes`, `linearize` and `recover_from_products`,
+  `common_d_lattice`, and the `adfgvx_crack` search. They are tested and their failure paths
+  are honest, but their reach is narrow and measured rather than theoretical; each states its
+  own boundary, and the section below collects them. Expect these to improve, not to freeze.
+- **Not covered yet**: whatever the "Honest limitations" list names (real-curve ECC beyond
+  toy curves, multivariate Coppersmith beyond two variables, Boneh-Durfee, full
+  Bleichenbacher). Those are reported as gaps and never faked.
 
 ## Honest limitations
 

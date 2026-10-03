@@ -217,11 +217,20 @@ Java/glibc PRNG 恢复、RSA 攻击封装、密钥解析与签名原语。
 `tests/test_audit_regressions.py` 把两轮独立审计找出的每个缺陷都钉住，防止错误公式和
 "看着对其实误导"的 docstring 复现。
 
-目前合计：**172 个用例全绿**（`python -m unittest discover -s tests`）。
+目前合计：**248 个用例全绿**（`python -m unittest discover -s tests`）。
 
 ---
 
 ## 如实说明的边界
+
+## API 稳定性
+
+`0.2.0` 是第一个非预览版，所以把话说明白：**稳定**的是原语、分析器、命令行、JSON schema 与
+结果字典契约 —— 这些名字和语义不会在没有废弃说明的情况下改动；**实验性但带实测边界**的是最新的
+格类能力（双变量 Coppersmith、线性化格、共用 d 的 SDAP 格、ADFGX/ADFGVX 破解），它们有测试、
+失败路径也诚实，但可达范围窄、且是实测值而非理论值，下一节逐条列了边界；**尚未覆盖**的是
+"诚实限制"里点名的那些（真实曲线 ECC、二元以上的多元 Coppersmith、Boneh-Durfee、完整
+Bleichenbacher），它们只报告缺口，不假装能做。
 
 - `glibc_rand_recover` 需要大约 **96 个以上连续输出**。更少时被丢弃的低位确实无法唯一确定：
   函数会枚举所有与观测一致的解，只有它们在后续输出上也一致时才返回状态，否则返回 `None`。

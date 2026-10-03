@@ -45,6 +45,7 @@ from .utils.encoding import (
     loose_flag_candidates, find_flags, build_flag_pattern, set_flag_prefixes,
     get_flag_prefixes, reset_flag_prefixes, DEFAULT_FLAG_PREFIXES,
     decode_chain, guess_kinds, single_byte_xor, repeating_key_xor,
+    repeating_key, single_byte_op, confidence_note,
     caesar, rot13, affine_decrypt, morse_decode, morse_encode,
     vigenere_recover, fence_decrypt, index_of_coincidence,
     to_hex, to_base64, to_base32, to_base58,
@@ -87,8 +88,7 @@ from .utils.modular import (
     legendre_symbol, jacobi_symbol, kronecker_symbol, is_quadratic_residue,
     sqrt_mod, totient, carmichael, mobius, is_squarefree, sum_of_divisors,
     divisor_count, order_mod, primitive_root, is_primitive_root, crt_general,
-    crt_list, gcd_list, lcm_list, pollard_pm1, williams_pp1, is_smooth,
-    smooth_part, integer_log, binomial_mod,
+    crt_list, gcd_list, lcm_list, pollard_pm1, williams_pp1, is_smooth,    smooth_part, integer_log, binomial_mod,
 )
 from .utils.polytools import (
     poly_divmod, poly_mod, poly_gcd, poly_derivative, poly_roots_mod_p,
@@ -174,7 +174,7 @@ from .core.solve import (
     register_solver, list_solvers, generate as solve_script,
 )
 
-__version__ = "0.2.0b1"
+__version__ = "0.2.0"
 __author__ = "coolmoon & guaidao2"
 __license__ = "MIT"
 
@@ -198,6 +198,7 @@ _CANDIDATE_EXPORTS = [
     "set_flag_prefixes", "get_flag_prefixes", "reset_flag_prefixes",
     "DEFAULT_FLAG_PREFIXES",
     "decode_chain", "guess_kinds", "single_byte_xor", "repeating_key_xor",
+    "repeating_key", "single_byte_op", "confidence_note",
     "caesar", "rot13", "affine_decrypt", "morse_decode", "morse_encode",
     "vigenere_recover", "fence_decrypt", "index_of_coincidence",
     "to_hex", "to_base64", "to_base32", "to_base58",

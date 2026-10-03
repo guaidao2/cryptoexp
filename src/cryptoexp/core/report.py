@@ -113,6 +113,10 @@ def print_results(results: dict, verification: dict = None):
         print_section_header("Classical ciphers")
         for probe in cla["probes"][:4]:
             print_field("text", probe["text"][:46] + ("..." if len(probe["text"]) > 46 else ""))
+            if probe.get("note"):
+                # Deferred chunks (encoded blobs) carry the reason here; the scored
+                # chunks never set it.
+                print_warning(probe["note"])
             if probe.get("morse"):
                 print_field("morse", f"{probe['morse']['plaintext'][:50]} "
                                      f"(score {probe['morse']['score']})")
