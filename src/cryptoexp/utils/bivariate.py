@@ -11,7 +11,7 @@ Representation (fixed here, used by every public name in this file AND returned 
 `poly2_resultant`'s bivariate inputs):
   * A bivariate polynomial is a dict `{(i, j): coefficient}` - key (i, j) means the
     monomial x^i * y^j (i is the x exponent, j the y exponent). Values are ints.
-  * Missing keys are zero and are never stored: `_clean` drops zero coefficients and
+  * Missing keys are zero and are never stored: the reducer drops zero coefficients and
     the empty dict `{}` is the zero polynomial. There is no "trailing zero" problem as
     there is with a list encoding, so no trimming convention is needed.
   * `poly2_resultant(f, g, y)` returns a UNIVARIATE polynomial as a plain list of
@@ -23,26 +23,50 @@ Representation (fixed here, used by every public name in this file AND returned 
 Cost and practical range (measured on this machine, CPython 3.11, pure-Python Fraction
 LLL from `.lattice`):
   * `poly2_resultant` is the determinant of the Sylvester matrix over the polynomial
-    ring, eliminated with the fraction-free Bareiss recurrence; each Bareiss division is
-    an exact pseudoremainder (or, when the leading coefficient is invertible, plain long
-    division). Multiplication of univariate coefficient lists dominates, so the cost is
-    roughly O(d^3) polynomial multiplications with d = deg(f, y) + deg(g, y). It refuses
-    (returns None) when d exceeds `_SYLV_DIM_CAP` (= 14) or when an intermediate univariate
-    degree exceeds `_POLY_DEG_CAP` (= 5000); it is deliberately NOT the
-    evaluate-at-many-points-then-interpolate method, which needs deg+1 resultants and is
-    both slower and easier to get wrong.
+    ring, eliminated with the fraction-free Bareiss recurrence (each division is exact,
+    and a non-exact one makes the whole call return None - never a wrong answer). The
+    one exception is the degree-1 case, which uses the closed form
+    Res = lc(f)^deg(g) * g(root of f) with the denominators cleared; that is the shape
+    every Coppersmith post-processing resultant has, and it keeps this module fast (a
+    128-bit instance's resultant is sub-millisecond). Cost otherwise is O(d^3)
+    polynomial multiplications in d = deg(f, var) + deg(g, var); the function refuses
+    (returns None) once d exceeds `_SYLV_DIM_CAP` (= 14) or an intermediate univariate
+    degree exceeds `_POLY_DEG_CAP` (= 5000). It is deliberately NOT the
+    evaluate-at-deg+1-points-then-interpolate method.
   * `coppersmith_bivariate` inherits `.lattice.lll`'s hard cap of 12 in each dimension,
-    so shifts are only kept while rows <= 12 and columns <= 12; the default parameter
-    ladder stops at a 9x11 lattice. Measured: a 128-bit n with the top ~44 bits of both
-    primes known is recovered in about 2 s; a 256-bit n with ~56 known bits works in
-    under a minute when the polynomials cooperate. Anything outside that returns
-    ok=False with the bound actually reached, never a guessed root.
+    so the shift lattice is assembled greedily (a row is only added while its monomials
+    still fit the 12-column budget) and four orderings are tried. Two screens keep the
+    cost bounded: a conservative Howgrave-Graham determinant test (a lattice that provably
+    cannot carry the bound is never reduced) and a preflight on the basis entry size,
+    because the pure-Python Fraction reduction grows steeply with it (measured: 766-bit
+    entries -> 37 s, 1035-bit -> 76 s and still failed, so the cap is 1000 bits).
+    MEASURED (m=2, t=1, default budgets) on the two-unknown RSA instance
+    f = (P + x)(Q + y) - n, |x|, |y| < X = Y:
+        X = Y = 2^2 .. 2^6   solved for n of 64, 128, 256 and 384 bits (~3-38 s)
+        X = Y = 2^7          2 of 3 at 64 bits, 0 of 3 at 128 and 256 bits
+        X = Y = 2^8          0 of 6 at 64 bits (but 4/4 when P == Q)
+        X = Y = 2^12         not solved at any size
+    So the honest summary is "a few bits per unknown, and n up to ~384 bits", NOT the
+    XY < N^(2/3) the literature gives for the bilinear case. The gap is the 12x12 lattice
+    cap: f^2 is degree 2 in each variable, its monomials alone nearly fill the column
+    budget, and the greedy builder cannot fit the shifts that would carry the bound. This
+    is a CTF-scale attack and it is documented as one.
+  * `known_high_bits_two_primes` therefore needs the unknown low part of each prime to be
+    a handful of bits: 64/128/256/384-bit n work with known_bits = half - 6, and a 512-bit
+    n is no longer worth it - with the cap lifted it still succeeds but takes 74 s and its
+    basis entries are 1035 bits, so the preflight refuses it immediately (0.0 s) and says
+    why. On failure p and q stay None and the note names the bound reached and the
+    direction to widen.
+
+Every root in a result is verified by substituting into f modulo N before it is
+reported; an unverified candidate is mentioned in the note and never in "roots".
 
 Pure standard library; the number theory and the lattice come from `.algebra`,
 `.lattice` and `.polytools`.
 """
 
 import math
+import re
 import time
 
 from . import algebra as A
@@ -55,7 +79,7 @@ __all__ = [
     "poly2_resultant", "coppersmith_bivariate", "known_high_bits_two_primes",
 ]
 
-# ────────────────────────── bounds (all documented, all enforced) ──────────────────────────
+# bounds (all documented, all enforced) ---------------------------------------------------
 
 _MAX_ROWS = 12          # .lattice.lll refuses more than 12 vectors (returns None)
 _MAX_COLS = 12          # ... and more than 12 columns, so the shift set must fit both
@@ -64,10 +88,13 @@ _POLY_DEG_CAP = 5000    # give up on a univariate intermediate beyond this degre
 _SCAN_DIVISORS = 200000  # divisor scan budget inside _int_roots
 _SCAN_MAX_BITS = 64      # ... and only while the constant term is this small
 _INT_ROOT_DEG = 14       # degree beyond which _int_roots gives up (documented)
-_DEFAULT_TIME_BUDGET = 60.0
+_MAX_POLYS = 7           # pairwise-resultant stage uses at most this many polynomials
+_ROOT_POLY_DEG = 6       # a resultant of this degree or less is solved on its own
+_LAST_SCREEN = {}        # lattices dropped by each screen (see _candidate_lattices)
+_MAX_COEFF_BITS = 1000   # preflight: reduce only while basis entries are this small
 
 
-# ────────────────────────── bivariate polynomial arithmetic ──────────────────────────
+# bivariate polynomial arithmetic ---------------------------------------------------------
 
 def _reduce_poly2(f, p=None):
     """Validate a {(i, j): c} dict, drop zeros and reduce coefficients mod p"""
@@ -245,7 +272,7 @@ def poly2_degree(f):
     return (max(i + j for i, j in f), dx, dy)
 
 
-# ────────────────────────── univariate helpers (ascending coefficients) ──────────────────────────
+# univariate helpers (ascending coefficients) ---------------------------------------------
 
 def _poly_trim(f):
     """Drop high-degree zeros; [] means the zero polynomial (matches polytools)"""
@@ -253,16 +280,6 @@ def _poly_trim(f):
     while out and out[-1] == 0:
         out.pop()
     return out
-
-
-def _poly_add(a, b, p=None):
-    n = max(len(a), len(b))
-    out = [0] * n
-    for i in range(n):
-        out[i] = (a[i] if i < len(a) else 0) + (b[i] if i < len(b) else 0)
-        if p is not None:
-            out[i] %= p
-    return _poly_trim(out)
 
 
 def _poly_sub(a, b, p=None):
@@ -352,32 +369,6 @@ def _poly_divmod_q(a, b):
     while rem and not rem[-1]:
         rem.pop()
     return quot, rem
-
-
-def _poly_pseudorem(a, b):
-    """Integer pseudo-remainder: lc(b)^(deg a - deg b + 1) * a mod b, exactly in Z[x]
-
-    Needed because over Z dividing by a non-unit leading coefficient would leave Z[x].
-    The remainder is then made primitive so the coefficients stay small.
-    """
-    a, b = _poly_trim(a), _poly_trim(b)
-    if not b:
-        raise ZeroDivisionError("polynomial division by zero")
-    da, db = len(a) - 1, len(b) - 1
-    if da < db:
-        return _poly_primitive(a)
-    lead = b[-1]
-    rem = list(a)
-    for _ in range(da - db + 1):
-        d = len(rem) - 1
-        if d < db or not rem:
-            break
-        coef = rem[d]
-        rem = [x * lead for x in rem]
-        for i in range(db + 1):
-            rem[d - db + i] -= coef * b[i]
-        rem = _poly_trim(rem)
-    return _poly_primitive(rem)
 
 
 def _poly_trunc_fraction(a, maxdeg):
@@ -488,7 +479,7 @@ def _poly_bareiss_exact(rows, p=None, maxdeg=None, counter=None):
     return _poly_trim(det) if p is None else _poly_trim([c % p for c in det])
 
 
-# ────────────────────────── resultant ──────────────────────────
+# resultant -------------------------------------------------------------------------------
 
 def _sylvester_rows(f, g, var):
     """Sylvester matrix rows of f, g with respect to `var` ('x' or 'y')
@@ -544,106 +535,6 @@ def _coef_lists_in(poly, var):
             lst[power] = c
         out[k] = _poly_trim(lst)
     return out
-
-
-def _bilinear_separator(f):
-    """Kill the x*y term by adding f to its mirror curve -f(x, -y)
-
-    With f = a*x*y + b*x + c*y + d and mirror = -f(x, -y) = -a*x*y + c*x - b*y + d, the
-    sum
-        f + mirror = (b + c)*x + (c - b)*y + 2*d
-    is LINEAR in both variables. Both curves vanish at any root of f that also has
-    f(x, -y) = 0, which is the bilinear "symmetric" shape every known-high-bits RSA
-    instance has: f = (P + x)*(Q + y) - n has a = 1, b = Q, c = P and mirror = -f(x, -y)
-    = -x*y + P*x - Q*y + d exactly. (Using f(x, -y) itself instead of its negative is
-    the trap: the sum then keeps the x*y term and the "separator" does not vanish at the
-    root at all - measured as a nonzero residual of 6*10^11 on a 64-bit instance, and
-    the resulting quadratic had no integer roots.) Returns None when f is not bilinear.
-    """
-    if len(f) != 4 or _deg_in(f, "x") != 1 or _deg_in(f, "y") != 1:
-        return None
-    a, b, c, d = f.get((1, 1), 0), f.get((1, 0), 0), f.get((0, 1), 0), f.get((0, 0), 0)
-    if not a or not b or not c:
-        return None
-    return {"coef_x": b + c, "coef_y": c - b, "const": 2 * d}
-
-
-def _bilinear_y_candidates(f, Y):
-    """Integer y with f(x, y) == 0 for some x, found through the linear separator
-
-    The separator (b + c)*x + (c - b)*y + 2*d = 0 gives x = -((c - b)*y + 2*d)/(b + c).
-    Substituting that into f = 0 and clearing the denominator (b + c) leaves a quadratic
-    in y - its leading coefficient is (c - b), NOT -(c - b) - and its integer roots are
-    found with `_int_roots`. The caller verifies every candidate against f.
-    """
-    sep = _bilinear_separator(f)
-    if sep is None:
-        return []
-    a, b, c, d = f.get((1, 1), 0), f.get((1, 0), 0), f.get((0, 1), 0), f.get((0, 0), 0)
-    cx, cy, cd = sep["coef_x"], sep["coef_y"], sep["const"]
-    if cx == 0:
-        # cx == 0 means b + c == 0; the separator then pins y directly
-        return _int_roots([cd, cy], Y, max_tries=0)
-    # x = -(cy*y + cd)/cx ; multiply a*x*y + b*x + c*y + d = 0 by cx:
-    #   -a*(cy*y + cd)*y - b*(cy*y + cd) + (c*y + d)*cx = 0
-    quad = [
-        cx * d - b * cd,            # constant term
-        cx * c - b * cy - a * cd,   # coefficient of y
-        -a * cy,                    # coefficient of y^2
-    ]
-    return _int_roots(quad, Y)
-
-
-def _bilinear_candidates(f, X, Y):
-    """Integer (x, y) with f(x, y) == 0 for a bilinear f (exact, no lattice)
-
-    For each candidate y from `_bilinear_y_candidates`, solve the separator linearly for
-    x and keep the pair only if an exact integer evaluation of f confirms it. This is the
-    path the RSA known-high-bits case takes; every returned pair satisfies f == 0 as a
-    polynomial evaluation, not just mod N.
-    """
-    sep = _bilinear_separator(f)
-    if sep is None:
-        return []
-    cx, cy, cd = sep["coef_x"], sep["coef_y"], sep["const"]
-    out = []
-    for y0 in _bilinear_y_candidates(f, Y):
-        if abs(y0) >= Y:
-            continue
-        if cx:
-            num = -(cy * y0 + cd)
-            if num % cx:
-                continue
-            x0 = num // cx
-        else:
-            x0 = 0
-        if abs(x0) < X and poly2_eval(f, x0, y0) == 0:
-            out.append((x0, y0))
-    return sorted(set(out))
-
-
-def _poly_eval_rational(a, num, den):
-    """Numerator of den^deg(a) * a(num/den) for an integer polynomial a
-
-    The denominator is cleared exactly instead of using Fraction: this is the
-    homogeneous evaluation, which keeps everything in Z[x] and is what the degree-1
-    Sylvester shortcut needs.
-    """
-    if not a:
-        return []
-    deg = len(a) - 1
-    out = [0] * (deg + 1)
-    for k, c in enumerate(a):
-        if not c:
-            continue
-        left = deg - k
-        term = c
-        if num:
-            term *= num ** k
-        if den:
-            term *= den ** left
-        out[left] += term
-    return _poly_trim(out)
 
 
 def poly2_resultant(f, g, y, p=None):
@@ -788,7 +679,7 @@ def _scale_poly(a, p=None):
     return _poly_trim([c % p for c in a]) if p is not None else _poly_trim(a)
 
 
-# ────────────────────────── integer roots of a univariate polynomial ──────────────────────────
+# integer roots of a univariate polynomial ------------------------------------------------
 
 def _int_roots(coeffs, shift, max_tries=_SCAN_DIVISORS):
     """Exact integer roots of `coeffs` (ascending, may be huge) - no numeric solver
@@ -862,7 +753,7 @@ def _int_roots(coeffs, shift, max_tries=_SCAN_DIVISORS):
     return sorted(set(roots))
 
 
-# ────────────────────────── Coppersmith post-processing helpers ──────────────────────────
+# Coppersmith post-processing helpers -----------------------------------------------------
 
 def _to_y_univariate(poly, x0):
     """Substitute x = x0 -> univariate polynomial in y (ascending coefficients)"""
@@ -875,42 +766,6 @@ def _to_y_univariate(poly, x0):
             out.extend([0] * (j + 1 - len(out)))
         out[j] += val
     return _poly_trim(out)
-
-
-def _to_x_univariate(poly, y0):
-    """Substitute y = y0 -> univariate polynomial in x (ascending coefficients)"""
-    out = []
-    for (i, j), c in poly.items():
-        if not c:
-            continue
-        val = c * (y0 ** j)
-        if len(out) <= i:
-            out.extend([0] * (i + 1 - len(out)))
-        out[i] += val
-    return _poly_trim(out)
-
-
-def _bilinear_conjugate(f):
-    """For f = a*x*y + b*x + c*y + d (an irreducible bilinear), return [[x, -y]]-form
-
-    The resultant of f and its "conjugate" at (x, -y) is (a*delta)^2 with
-    delta = b*y - c*x + d - a*x*y, which is exactly the second linear factor of the
-    product (n - (p_high + x)(q_high + y)) * (n - (p_high + x)(q_high - y)). Knowing
-    that factor lets the two unknowns be separated with a single square root instead of
-    a big resultant, which is what makes the known-high-bits case cheap.
-    Returns None when f is not of that shape.
-    """
-    if len(f) != 4:
-        return None
-    get = f.get
-    if any(get(k, 0) == 0 for k in ((1, 1), (1, 0), (0, 1), (0, 0))):
-        return None
-    return {
-        (0, 0): get(0, 0),
-        (0, 1): get(1, 0),
-        (1, 0): -get(0, 1),
-        (1, 1): -get(1, 1),
-    }
 
 
 def _solve_for_y(poly, x0, Y, tries=_SCAN_DIVISORS):
@@ -938,72 +793,7 @@ def _solve_for_y(poly, x0, Y, tries=_SCAN_DIVISORS):
     return sorted({y for y in out if abs(y) < Y and _poly_eval_int(q, y) == 0})
 
 
-def _solve_for_x(poly, y0, X, tries=_SCAN_DIVISORS):
-    """Integer x with poly(x, y0) == 0 and |x| < X"""
-    q = _to_x_univariate(poly, y0)
-    if not q or q[0] == 0:
-        return []
-    out = []
-    d = len(q) - 1
-    if d == 1 and q[1]:
-        if q[0] % q[1] == 0:
-            out.append(-q[0] // q[1])
-    elif d == 2:
-        c0, c1, c2 = q
-        if c1 % 2 == 0:
-            disc = c1 * c1 - 4 * c2 * c0
-            r = A.perfect_square(disc)
-            if r is not None:
-                for num in (-c1 + r, -c1 - r):
-                    if num % (2 * c2) == 0:
-                        out.append(num // (2 * c2))
-    elif d >= 3:
-        for cand in _int_roots(q, X, max_tries=tries):
-            out.append(cand)
-    return sorted({x for x in out if abs(x) < X and _poly_eval_int(q, x) == 0})
-
-
-# ────────────────────────── the lattice shift set ──────────────────────────
-
-def _shift_rows(f, N, deg_bounds, max_rows=_MAX_ROWS, max_cols=_MAX_COLS):
-    """Build one Howgrave-Graham/Coron shift set -> (rows, monomials) or (None, None)
-
-    `deg_bounds[k]` for k = 0..m is the total-degree window D_k used at power k: the
-    rows are x^i * y^j * f^k * N^(m-k) for k < m and x^i * y^j * f^m for k == m, with
-    i + j <= D_k. Each row is paired with its (i, j) because the caller has to scale
-    the coefficient of x^i y^j by X^i * Y^j.
-
-    The window is deliberately expressed as a total degree rather than independent
-    boxes: the lattice is capped at 12 rows x 12 columns by `.lattice.lll`, and the
-    shifted copies of a degree-2 polynomial fill a staircase, so a box window would
-    overflow the column budget while contributing no extra monomials. Each candidate is
-    built here and the caller walks a ladder from rich to poor until one fits.
-    """
-    try:
-        m = len(deg_bounds) - 1
-        fm = poly2_pow(f, m)
-        rows = []
-        for k in range(m + 1):
-            if k == m:
-                base = fm
-            else:
-                base = poly2_scale(poly2_pow(f, k), N ** (m - k))
-            dk = deg_bounds[k]
-            for i in range(dk + 1):
-                for j in range(dk + 1 - i):
-                    rows.append((poly2_shift_y(poly2_shift_x(base, i), j), i, j))
-    except (OverflowError, MemoryError):
-        # an intermediate power blew up: report "does not fit" rather than raising
-        return None, None
-    if not rows:
-        return None, None
-    mon = set()
-    for poly, _, _ in rows:
-        mon.update(poly)
-    if len(rows) > max_rows or len(mon) > max_cols:
-        return None, None
-    return rows, sorted(mon)
-
+# the lattice shift set -------------------------------------------------------------------
 
 def _shift_polys(f, N, m, order, max_rows=_MAX_ROWS, max_cols=_MAX_COLS):
     """Greedily assemble a shift lattice that is exactly bounded by the caps
@@ -1035,7 +825,7 @@ def _shift_polys(f, N, m, order, max_rows=_MAX_ROWS, max_cols=_MAX_COLS):
         if len(need) > max_cols:
             continue
         monomials = need
-        rows.append((poly, i, j))
+        rows.append((poly, i, j, k))
     if not rows:
         return None, None
     return rows, sorted(monomials)
@@ -1083,30 +873,91 @@ def _shift_orders(f, N, m, t, max_shift):
             ("power-first", by_power)]
 
 
-def _candidate_lattices(f, N, m, t, max_shift=4):
+def _candidate_lattices(f, N, m, t, max_shift=4, X=None, Y=None):
     """All shift lattices the greedy builder can reach, deduplicated, best first
 
     Best is judged by column count descending (a wider monomial set means more of the
     bound is carried), then by row count descending. Bounded work: four orderings times
-    one greedy pass each, and every pass is capped by the 12x12 lattice limits.
+    one greedy pass each, and every pass is capped by the 12x12 lattice limits. When X and
+    Y are given, the conservative determinant test in `_lattice_is_feasible` drops the
+    lattices that provably cannot carry the bound, which is what keeps an out-of-range
+    instance from spending a minute inside the pure-Python LLL before saying no.
+    `_LAST_SCREEN` records how many lattices each screen rejected, so the caller's failure
+    note can say WHICH screen stopped the search instead of a generic message.
     """
     out = []
     seen = set()
+    _LAST_SCREEN.clear()
     for label, order in _shift_orders(f, N, m, t, max_shift):
         rows, mon = _shift_polys(f, N, m, order)
         if rows is None:
+            _LAST_SCREEN["cap"] = _LAST_SCREEN.get("cap", 0) + 1
             continue
         key = tuple(mon)
         if key in seen:
             continue
         seen.add(key)
+        if X is not None and not _lattice_is_feasible(rows, mon, m, N, X, Y):
+            _LAST_SCREEN["determinant"] = _LAST_SCREEN.get("determinant", 0) + 1
+            continue
         out.append(("m=%d,t=%d,%s %dx%d" % (m, t, label, len(rows), len(mon)),
                     rows, mon))
     out.sort(key=lambda item: (-len(item[2]), -len(item[1])))
     return out
 
 
-# ────────────────────────── bivariate Coppersmith ──────────────────────────
+def _lattice_is_feasible(rows, monomials, m, N, X, Y):
+    """Conservative Howgrave-Graham determinant test: can this lattice possibly work?
+
+    For each row the diagonal contribution is at least
+        N^(m-k) / |coefficient of the row's largest scaled monomial| * (that monomial)
+    and the columns contribute the product of their X^i Y^j. Summing log2 of all of that
+    gives a LOWER bound for log2|det| (zero cells only lower it further, so the test errs
+    on the side of keeping a lattice). If
+        2 * log2|det| >= dim * m * log2 N
+    then even the shortest vector must exceed N^m / sqrt(dim) and no polynomial produced
+    from this lattice can vanish at the root, so the reduction is skipped.
+    This is a heuristic screen, never a proof of success: a lattice that passes it may
+    still fail, and it can only reject lattices that provably cannot carry the bound.
+    """
+    logn = math.log2(N)
+    logx = math.log2(X) if X > 1 else 0.0
+    logy = math.log2(Y) if Y > 1 else 0.0
+    total = 0.0
+    for (i, j) in monomials:
+        total += i * logx + j * logy
+    for item in rows:
+        poly = item[0]
+        k = item[3] if len(item) > 3 else _row_power(poly, m, N)
+        best = max(poly, key=lambda key: key[0] * logx + key[1] * logy)
+        coeff = abs(poly[best])
+        if coeff > 1:
+            total -= math.log2(coeff)
+        total += (m - k) * logn
+        total += best[0] * logx + best[1] * logy
+    dim = len(monomials)
+    return 2 * total < dim * m * logn
+
+
+def _row_power(poly, m, N):
+    """Recover which f-power a row came from, for rows built without the k tag
+
+    Only used when a caller hands `_lattice_is_feasible` three-element rows; the module
+    itself always tags rows with k. The heuristic: the row's constant term carries
+    N^(m-k) times the constant term of f^k, so the largest power of N dividing the row's
+    content is that N^(m-k) (the other coefficients are much smaller).
+    """
+    g = 0
+    for c in poly.values():
+        g = math.gcd(g, abs(c))
+    k = m
+    while k > 0 and N and g % N == 0:
+        g //= N
+        k -= 1
+    return k
+
+
+# bivariate Coppersmith -------------------------------------------------------------------
 
 def _run_window(f, N, X, Y, rows, monomials, label, deadline):
     """One full attack attempt over one shift lattice -> result dict
@@ -1122,7 +973,7 @@ def _run_window(f, N, X, Y, rows, monomials, label, deadline):
     col_of = {key: idx for idx, key in enumerate(monomials)}
     scaling = [pow(X, i) * pow(Y, j) for (i, j) in monomials]
     basis = []
-    for poly, _, _ in rows:
+    for poly, _i, _j, _k in rows:
         row = [0] * dim_c
         for key, c in poly.items():
             row[col_of[key]] = c * scaling[col_of[key]]
@@ -1131,7 +982,31 @@ def _run_window(f, N, X, Y, rows, monomials, label, deadline):
     # zero squared norm, so pad with zero rows up to the number of columns
     while len(basis) < dim_c:
         basis.append([0] * dim_c)
-    reduced = L.lll(basis)
+    # preflight: the pure-Python Fraction LLL cost grows steeply with the coefficient
+    # size (measured: 766-bit entries -> 37 s, 1023-bit -> 76 s, and one more doubling is
+    # minutes), so refuse the reduction we know we cannot finish inside any sane budget
+    maxbits = 0
+    for row in basis:
+        for v in row:
+            if v:
+                b = v.bit_length()
+                if b > maxbits:
+                    maxbits = b
+    if maxbits > _MAX_COEFF_BITS:
+        found = re.search(r"m=(\d+),t=(\d+)", label)
+        mm, tt = (int(found.group(1)), int(found.group(2))) if found else (None, None)
+        return {"ok": False, "roots": [], "factor": None,
+                "detail": "lattice %dx%d (%s) has %d-bit basis entries, over the %d-bit "
+                          "reduction cap" % (dim_r, dim_c, label, maxbits, _MAX_COEFF_BITS),
+                "note": "the bound reached was X=%d, Y=%d with m=%s, t=%s; shrink X/Y or "
+                        "lower m/t (measured: 766-bit entries take ~37 s, 1023-bit ~76 s)"
+                        % (X, Y, mm, tt)}
+    try:
+        reduced = L.lll(basis)
+    except Exception:  # LLL itself must never take the caller down
+        return {"ok": False, "roots": [], "factor": None, "skipped": True,
+                "detail": "LLL raised on the %d x %d lattice (%s)" % (dim_r, dim_c, label),
+                "note": ""}
     if reduced is None:
         return {"ok": False, "roots": [], "factor": None, "skipped": True,
                 "detail": "LLL refused the lattice (%d x %d, %s)" % (dim_r, dim_c, label),
@@ -1177,12 +1052,13 @@ def coppersmith_bivariate(f, N, X, Y, m=None, t=None, time_budget=60.0):
         "factor" is a non-trivial factor of N when one falls out (gcd of a root with N).
     Method: the Howgrave-Graham/Coron shift lattice x^i y^j f^k N^(m-k) plus the extra
     f^m shifts, LLL-reduced by `.lattice.lll`, the short vectors turned back into integer
-    polynomials, then y is eliminated with `poly2_resultant` and the common x-coordinate
-    is taken from the GCD over Q[x] of two resultants. Candidates are only reported after
-    an exact substitution.
-    Honest limits: see the module docstring - this is a 12x12 pure-Python lattice and it
-    reaches roughly 2^60 of N for the two-unknown case; a 512-bit n with half of both
-    primes known is far outside that.
+    polynomials, then y is eliminated with `poly2_resultant` and x is read out of the
+    low-degree resultants (or their GCD over Q[x], see `_resultant_stage`). Candidates are
+    only reported after an exact substitution.
+    Honest limits: see the module docstring - the 12x12 pure-Python lattice reaches an
+    unknown half of about 2^6-2^7 per prime and n up to roughly 384 bits; larger n is
+    refused by the basis-size preflight rather than ground away. That is well short of the
+    XY < N^(2/3) the literature gives for the bilinear case, and the gap is the lattice cap.
     """
     t0 = time.time()
     f = _reduce_poly2(f, None)
@@ -1214,14 +1090,12 @@ def coppersmith_bivariate(f, N, X, Y, m=None, t=None, time_budget=60.0):
     deadline = t0 + time_budget
     tried = []
     best = None
-    skipped = 0
-    for label, rows, monomials in _candidate_lattices(f, N, m, t):
+    for label, rows, monomials in _candidate_lattices(f, N, m, t, X=X, Y=Y):
         if time.time() > deadline:
             break
         tried.append("%s" % label)
         res = _run_window(f, N, X, Y, rows, monomials, label, deadline)
         if res.get("skipped"):
-            skipped += 1
             continue
         res["detail"] = res["detail"] + ", %.1fs total" % (time.time() - t0)
         if res["ok"]:
@@ -1229,11 +1103,20 @@ def coppersmith_bivariate(f, N, X, Y, m=None, t=None, time_budget=60.0):
         if best is None:
             best = res
     if best is None:
+        reasons = []
+        if _LAST_SCREEN.get("cap"):
+            reasons.append("%d lattice(s) over the %dx%d cap"
+                           % (_LAST_SCREEN["cap"], _MAX_ROWS, _MAX_COLS))
+        if _LAST_SCREEN.get("determinant"):
+            reasons.append("%d rejected by the determinant test (the bound X=%d, Y=%d is "
+                           "too large for m=%d, t=%d)"
+                           % (_LAST_SCREEN["determinant"], X, Y, m, t))
         return {"ok": False, "roots": [], "factor": None,
-                "detail": "the greedy builder could not assemble any shift lattice for "
-                          "m=%d t=%d under the %dx%d cap (LLL refusals: %d)"
-                          % (m, t, _MAX_ROWS, _MAX_COLS, skipped),
-                "note": "widen by lowering m/t (smaller lattice) or shrinking X/Y"}
+                "detail": "no shift lattice survived for m=%d, t=%d: %s"
+                          % (m, t, "; ".join(reasons) if reasons else "builder produced "
+                             "nothing"),
+                "note": "widen by shrinking X/Y or lowering m/t; measured reach is about "
+                        "X*Y <= 2^13 with m=2, t=1 and the 12x12 lattice cap"}
     best["note"] = (best["note"] + " | no lattice in the set worked (tried %s)"
                     % (tried[:6],)).strip()
     return best
@@ -1242,16 +1125,21 @@ def coppersmith_bivariate(f, N, X, Y, m=None, t=None, time_budget=60.0):
 def _resultant_stage(polys, X, Y, record, deadline):
     """Eliminate y pairwise and pull x-candidates out of the resultants
 
-    Three ways to read a root out of a univariate resultant R(x), tried in order because
-    which one succeeds depends on the instance:
-      1. R itself, when deg R is small (<= 6) - solved exactly by `_int_roots`;
-      2. the GCD over Q[x] of two resultants, when that GCD is small;
-      3. the same GCD but larger (<= 12), still worth an exact attempt.
-    Every candidate is then completed with a partner y and handed to `record`, which
-    re-verifies. Nothing here reports anything by itself.
+    Cost control comes first, because this stage is where the time goes: only the
+    `_MAX_POLYS` shortest-in-degree polynomials are paired (a 12-polynomial lattice has
+    66 pairs and every resultant is a sizable polynomial), and the pairs are then used in
+    two ways:
+      1. the low-degree resultants THEMSELVES - if deg R is small then its integer roots
+         include the root x0, and `_int_roots` finds them exactly. This is the cheap and
+         usually sufficient path.
+      2. the GCD over Q[x] of the two lowest-degree resultants - only when path 1 found
+         nothing. GCDs of huge polynomials are expensive, so at most one pair is tried.
+    Every candidate is completed with a partner y and handed to `record`, which
+    re-verifies; nothing here reports anything by itself.
     """
     if len(polys) < 2 or time.time() > deadline:
         return
+    polys = sorted(polys, key=lambda p: sum(poly2_degree(p)))[:_MAX_POLYS]
     res = []
     seen_r = set()
     for i in range(len(polys)):
@@ -1264,11 +1152,12 @@ def _resultant_stage(polys, X, Y, record, deadline):
                 continue
             seen_r.add(prim)
             res.append(list(prim))
+    res.sort(key=len)
     cands = []
     seen_c = set()
 
     def offer(poly):
-        if not poly or not (1 <= len(poly) <= 12):
+        if not poly or not (1 <= len(poly) <= _ROOT_POLY_DEG + 1):
             return
         key = tuple(int(c) for c in poly)
         if key in seen_c:
@@ -1277,13 +1166,16 @@ def _resultant_stage(polys, X, Y, record, deadline):
         cands.append(list(key))
 
     for r in res:
-        if len(r) <= 7:
+        if len(r) <= _ROOT_POLY_DEG + 1:
             offer(r)
-    for i in range(len(res)):
-        for j in range(i + 1, len(res)):
-            g = L._poly_gcd_rational(res[i], res[j])
-            if g:
-                offer([int(c) for c in g])
+    if not cands and len(res) >= 2:
+        # No low-degree resultant at all: fall back to the GCD over Q[x] of the two
+        # smallest resultants. Measured: trying three pairs instead of one made the
+        # FAILING cases several times slower without recovering anything new, so the
+        # fallback stays at a single pair - the low-degree resultants are the working path.
+        g = L._poly_gcd_rational(res[0], res[1])
+        if g:
+            offer([int(c) for c in g])
     for g in cands:
         for x0 in _int_roots(g, X):
             for poly in polys:
@@ -1324,15 +1216,7 @@ def _extract_roots(polys, f, N, X, Y, label, dim_r, dim_c, deadline):
     # the x-coordinate of the common root (this is the path that actually works)
     _resultant_stage(polys, X, Y, _record, deadline)
 
-    # stage 2: the bilinear separator (exact quadratic, no lattice). It applies only when
-    # the negation of f(x, -y) also vanishes at the root, which the RSA shape does not
-    # always satisfy, so it is an opportunistic extra - never the only path.
-    if not verified and time.time() < deadline:
-        for (x0, y0) in _bilinear_candidates(f, X, Y):
-            for poly in polys:
-                _record(x0, y0, poly)
-
-    # stage 3: modulo a few small primes - the true integer root must be congruent to a
+    # stage 2: modulo a few small primes - the true integer root must be congruent to a
     # root of every short polynomial modulo each prime; cheap and it prunes hard
     if not verified and time.time() < deadline:
         for (x0, y0) in _candidates_mod_prime(polys, X, Y):
@@ -1393,17 +1277,22 @@ def _candidates_mod_prime(polys, X, Y, primes=(2, 3, 5, 7), max_scan=64):
     return out
 
 
-# ────────────────────────── the two-prime known-high-bits case ──────────────────────────
+# the two-prime known-high-bits case ------------------------------------------------------
 
-def known_high_bits_two_primes(n, p_high, q_high, known_bits, total_bits=None):
+def known_high_bits_two_primes(n, p_high, q_high, known_bits, total_bits=None,
+                               time_budget=60.0):
     """Known high bits of BOTH RSA primes -> factor n (bivariate Coppersmith)
 
     f(x, y) = (p_high * 2^shift + x) * (q_high * 2^shift + y) - n with
     shift = total_bits/2 - known_bits, so x and y are the unknown low bits of p and q.
     Returns {"ok", "p", "q", "roots", "note"}; p * q == n is verified before the result
     is returned, and on failure p and q are None (never a guess).
-    Honest range: with the 12x12 lattice cap, the top half of a 512-bit n is out of
-    reach - see the module docstring for what is measured to work.
+    Honest range (measured, see the module docstring): the unknown low part must fit in
+    about 6-7 bits per prime, so 64-, 128-, 256- and 384-bit n work when known_bits is
+    within ~6 of half the bit length. A 512-bit n is refused immediately by the basis-size
+    preflight: with that cap lifted it does still solve at 6-bit unknowns, but it takes
+    74 s, which is not what a CTF helper should cost. When it cannot solve, `note` names
+    the bound that was reached and the direction to widen.
     """
     if not p_high or not q_high or p_high <= 0 or q_high <= 0:
         return {"ok": False, "p": None, "q": None, "roots": [],
@@ -1417,7 +1306,7 @@ def known_high_bits_two_primes(n, p_high, q_high, known_bits, total_bits=None):
     X = Y = 1 << shift
     ph, qh = p_high << shift, q_high << shift
     f = {(1, 1): 1, (1, 0): qh, (0, 1): ph, (0, 0): ph * qh - n}
-    res = coppersmith_bivariate(f, n, X, Y, m=2, t=1)
+    res = coppersmith_bivariate(f, n, X, Y, m=2, t=1, time_budget=time_budget)
     out = {"ok": False, "p": None, "q": None, "roots": res["roots"],
            "note": res["detail"] + " | " + res["note"] if res["note"] else res["detail"]}
     for x0, y0 in res["roots"]:

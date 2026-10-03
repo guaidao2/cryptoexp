@@ -153,6 +153,11 @@ from .utils.adfgvx import (
     adfgvx_encrypt, adfgvx_decrypt, adfgvx_detect, adfgvx_crack,
 )
 from .utils.common_d import common_d_lattice, common_d_attack
+from .utils.bivariate import (
+    poly2_from_terms, poly2_mul, poly2_add, poly2_sub, poly2_pow, poly2_eval,
+    poly2_degree, poly2_scale, poly2_shift_x, poly2_shift_y, poly2_resultant,
+    coppersmith_bivariate, known_high_bits_two_primes,
+)
 from . import hypothesis
 from .hypothesis import (
     evaluate as evaluate_hypotheses, list_hypotheses, register_hypothesis,
@@ -264,6 +269,10 @@ _CANDIDATE_EXPORTS = [
     "adfgvx_detect", "adfgvx_crack", "adfgx_square", "adfgvx_square",
     # shared private exponent across moduli (convergent stage, then the SDAP lattice)
     "common_d_attack", "common_d_lattice",
+    # bivariate polynomials + bivariate Coppersmith (the product-shaped small-root case)
+    "poly2_from_terms", "poly2_mul", "poly2_add", "poly2_sub", "poly2_pow", "poly2_eval",
+    "poly2_degree", "poly2_scale", "poly2_shift_x", "poly2_shift_y", "poly2_resultant",
+    "coppersmith_bivariate", "known_high_bits_two_primes",
     # RSA attacks (extra) / keys
     "franklin_reiter", "hastad_padded", "stereotyped_message",
     "parity_oracle_attack", "lsb_oracle_attack", "rsa_recover_d_from_factors",
