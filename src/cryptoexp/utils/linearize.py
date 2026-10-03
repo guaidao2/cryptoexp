@@ -1319,6 +1319,13 @@ def separate_variables(monomial_values, variables=None, max_coeff: int = 2):
         `{"ok", "solution", "used", "note"}`; `solution` maps only the variables that
         were separated and verified (`product of the monomials == the known value`).
         A variable that cannot be isolated is listed in the note - never guessed.
+
+    Scope: this step is exact arithmetic over the integers and takes no modulus. The
+    values it consumes are the ones a lattice has already proven (`linearize` /
+    `recover_from_products` report them, possibly as a partial dict when a product is
+    proven without its factors - that partial dict is exactly what belongs here).
+    For products that are only known *modulo* something, get them out of the lattice
+    first; a congruence never determines the integer product on its own.
     """
     pool = {}
     for mono, value in (monomial_values or {}).items():

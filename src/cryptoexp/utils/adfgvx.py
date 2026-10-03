@@ -121,7 +121,7 @@ _EFFORT = {
 }
 
 
-# ────────────────────────── small normalisation helpers ──────────────────────────
+#---- small normalisation helpers --------------------------------------------------------------
 
 def _norm_key(key) -> str:
     """A keyword reduced to the symbols that can order columns (uppercase alnum)"""
@@ -304,7 +304,7 @@ def _strip_ws(text) -> str:
     return "".join(ch for ch in str(text).upper() if not ch.isspace())
 
 
-# ────────────────────────── transposition ──────────────────────────
+#---- transposition ----------------------------------------------------------------------------
 
 def _fractionate(stream, key) -> str:
     """Write the pair stream in rows of `len(key)` and read the columns in key order"""
@@ -349,7 +349,7 @@ def _detranspose(text, read_order) -> str:
     return "".join(out)
 
 
-# ────────────────────────── digit substitution (ADFGVX) ──────────────────────────
+#---- digit substitution (ADFGVX) --------------------------------------------------------------
 
 def _digit_map(spec):
     """`digit_substitution=` -> a 10-letter string (index i is the stand-in for digit i)
@@ -389,7 +389,7 @@ def _undo_digits(text, digit_map) -> str:
     return "".join(rev.get(ch, ch) for ch in text)
 
 
-# ────────────────────────── public: squares ──────────────────────────
+#---- public: squares --------------------------------------------------------------------------
 
 def adfgx_square(key="", alphabet=None):
     """ADFGX key square -> (square, labels)
@@ -414,7 +414,7 @@ def adfgvx_square(key="", alphabet=None):
     return _build_square(key, alphabet or _ALPHA6, labels), labels
 
 
-# ────────────────────────── public: encrypt / decrypt ──────────────────────────
+#---- public: encrypt / decrypt ----------------------------------------------------------------
 
 def _run_encrypt(plaintext, key, rows, labels, digit_map) -> str:
     body = _plaintext_symbols(plaintext, rows, len(labels), digit_map)
@@ -478,7 +478,7 @@ def adfgvx_decrypt(ciphertext, key="", square=None, digit_substitution=None,
     return _run_decrypt(ciphertext, key, rows, labels, _digit_map(digit_substitution))
 
 
-# ────────────────────────── public: detection ──────────────────────────
+#---- public: detection ------------------------------------------------------------------------
 
 def _uniform_note(text, labels) -> str:
     """Evidence line: the per-label counts and how flat they are"""
@@ -547,7 +547,7 @@ def adfgvx_detect(text):
     return {"is_adfgvx": True, "labels": labels, "variant": variant, "why": why}
 
 
-# ────────────────────────── cracker: search primitives ──────────────────────────
+#---- cracker: search primitives ---------------------------------------------------------------
 
 def _effort(effort, time_budget=None) -> dict:
     cfg = _EFFORT.get(str(effort).lower())
@@ -644,7 +644,7 @@ def _search_all_lengths(stream, decode, max_keylen, cfg, deadline, rng):
             "incomplete": sorted(item[3] for item in per_k if not item[4])}
 
 
-# ────────────────────────── cracker: the square-unknown path ──────────────────────────
+#---- cracker: the square-unknown path ---------------------------------------------------------
 
 # Word-evidence gate for the no-square path. Spaces are gone once a plaintext has been
 # fractionated, so a word-list word is looked for as a substring. Measured on this
@@ -817,7 +817,7 @@ def _sweep_square_keys(stream, size, max_keylen, cfg, deadline, rng, guesses, ke
     return {"cands": out[:keep], "tried": tried, "total": len(guesses)}
 
 
-# ────────────────────────── cracker: public ──────────────────────────
+#---- cracker: public --------------------------------------------------------------------------
 
 def _blank(note, variant=None, t0=None) -> dict:
     """A failed result in the library's shape (never a fabricated plaintext)"""

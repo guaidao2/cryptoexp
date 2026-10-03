@@ -61,8 +61,9 @@ _MAX_ROWS = 12          # .lattice.lll refuses more than 12 vectors (returns Non
 _MAX_COLS = 12          # ... and more than 12 columns, so the shift set must fit both
 _SYLV_DIM_CAP = 14      # Sylvester matrix dimension for poly2_resultant (d^3 polynomial ops)
 _POLY_DEG_CAP = 5000    # give up on a univariate intermediate beyond this degree
-_SCAN_DIVISORS = 2000   # divisor scan budget inside _int_roots
-_SCAN_MAX_BITS = 40     # ... and only while the constant term is this small
+_SCAN_DIVISORS = 200000  # divisor scan budget inside _int_roots
+_SCAN_MAX_BITS = 64      # ... and only while the constant term is this small
+_INT_ROOT_DEG = 14       # degree beyond which _int_roots gives up (documented)
 _DEFAULT_TIME_BUDGET = 60.0
 
 
@@ -794,14 +795,18 @@ def _int_roots(coeffs, shift, max_tries=_SCAN_DIVISORS):
 
     Only roots that satisfy p(r) == 0 exactly are returned, so nothing here can
     fabricate one. The paths, cheapest first:
-      1. degree 1 -> exact division.
-      2. degree 2 -> perfect-square discriminant (algebra.perfect_square).
-      3. a bounded divisor scan (the constant term is that huge value only when the
-         polynomial is a product at the true root; divisibility gives a cheap filter
-         but the final test is always an exact evaluation).
-    A univariate polynomial of high degree with huge coefficients is deliberately NOT
-    attacked - the caller is expected to have taken a GCD of several short-vector
-    polynomials first, which is what the Coppersmith post-processing does.
+      1. degree 1 -> exact division (and degree 2 with an even middle coefficient ->
+         perfect-square discriminant, as `polytools.poly_roots_mod_p` does).
+      2. general 2 <= degree <= _INT_ROOT_DEG with a SMALL constant term: every integer
+         root divides the constant term, so the divisors are scanned directly. This is
+         the path that actually fires: the GCD of two resultants is usually a quadratic
+         with modest coefficients (measured: x^2 - 78x + 1517 for a root of 37), and
+         without it the module reported no root at all.
+      3. a divisor scan with early pruning by the roots modulo a small prime, for larger
+         polynomials.
+    `shift` is an upper bound used only to discard candidates cheaply; it is NOT trusted
+    as a correctness argument, an exact evaluation decides. A polynomial whose constant
+    term is astronomically large is deliberately abandoned - that is the documented limit.
     """
     p = _poly_trim(coeffs)
     if not p:
@@ -810,7 +815,6 @@ def _int_roots(coeffs, shift, max_tries=_SCAN_DIVISORS):
     roots = []
     if d <= 0:
         return roots
-    # x = 0 is a root exactly when the constant term vanishes (x factors out)
     if p[0] == 0:
         roots.append(0)
     if d == 1:
@@ -820,34 +824,41 @@ def _int_roots(coeffs, shift, max_tries=_SCAN_DIVISORS):
         return sorted(set(roots))
     if d == 2:
         c0, c1, c2 = p
-        if c2:
+        if c1 % 2 == 0:
             disc = c1 * c1 - 4 * c2 * c0
             r = A.perfect_square(disc)
             if r is not None:
                 for num in (-c1 + r, -c1 - r):
                     if num % (2 * c2) == 0:
                         roots.append(num // (2 * c2))
+        if roots or not c0:
+            return sorted(set(roots))
+    c0 = abs(p[0])
+    if not c0 or c0.bit_length() > _SCAN_MAX_BITS:
         return sorted(set(roots))
-    if d >= 3:
-        # Divisor scan of the constant term. A big constant term (which is exactly what
-        # a degree-r short-vector polynomial has: bit size ~ r * log2(N)) makes the scan
-        # hopeless, so it is only attempted while the constant term stays under
-        # _SCAN_MAX_BITS. Measured: without this guard the 128-bit known-high-bits case
-        # ran for over ten minutes inside this loop, with the guard it is instant.
-        c0 = abs(p[0]) if p[0] else 0
-        if c0 and c0.bit_length() <= _SCAN_MAX_BITS:
-            bound = int(shift) if isinstance(shift, int) and shift > 0 else 0
-            found = 0
-            r = 1
-            while c0 and r * r <= c0 and found < max_tries:
-                if c0 % r == 0:
-                    for cand in (r, -r, c0 // r, -(c0 // r)):
-                        found += 1
-                        if bound and abs(cand) >= bound:
-                            continue
-                        if cand not in roots and _poly_eval_int(p, cand) == 0:
-                            roots.append(cand)
-                r += 1
+    bound = int(shift) if isinstance(shift, int) and shift > 0 else 0
+    # pruning: any integer root is congruent to a root of p modulo 2 (or 3)
+    mod = 2
+    res_mod = [c % mod for c in p]
+    if not any(res_mod):
+        mod = 3
+        res_mod = [c % mod for c in p]
+        if not any(res_mod):
+            mod = None
+    tries = 0
+    limit = max_tries if d <= 3 else max_tries // 4
+    r = 1
+    while r * r <= c0 and tries < limit:
+        if c0 % r == 0:
+            for cand in (r, -r, c0 // r, -(c0 // r)):
+                tries += 1
+                if bound and abs(cand) >= bound:
+                    continue
+                if mod is not None and _poly_eval_int(res_mod, cand % mod, mod) != 0:
+                    continue
+                if cand not in roots and _poly_eval_int(p, cand) == 0:
+                    roots.append(cand)
+        r += 1
     return sorted(set(roots))
 
 
@@ -1030,37 +1041,46 @@ def _shift_polys(f, N, m, order, max_rows=_MAX_ROWS, max_cols=_MAX_COLS):
     return rows, sorted(monomials)
 
 
-def _shift_orders(m, t, max_shift):
-    """Candidate orderings of the (i, j, k) shifts, most promising first
+def _shift_orders(f, N, m, t, max_shift):
+    """Candidate orderings of the (i, j, k) shifts, most useful first
 
-    Three families are offered because which one fits 12x12 depends on the instance:
-      * "low first": small i + j first, so cheap high-power shifts enter before the
-        monomials of f^m (degree 2m) eat the column budget;
-      * "univariate first": only the shifts with j == 0 (or i == 0), which reproduces the
-        univariate Coppersmith bound in the direction that is not bounded;
-      * "balanced": by max(i, j), then by k descending (large f-powers carry the bound,
-        so they are offered while columns are still free).
-    The univariate-only shifts are always offered first in every family: they cost no
-    extra columns beyond the ones f^k already needs.
+    What matters is how many monomials a row brings: the trivial rows x^i * N^m and
+    y^j * N^m contribute ONE monomial each and are useless for the bound, while
+    x^i * y^j * f^k rows contribute several and are what makes the lattice short. A
+    greedy pass ordered by small shift first therefore fills all twelve rows with the
+    useless ones - measured on a toy instance: the resulting lattice had only x-only and
+    y-only columns, none of the cross monomials of f, and every short vector was a
+    multiple of N^m with no small root at all. So the orderings below are by monomial
+    count DESCENDING, with several tie-breaks, and the caller keeps whichever lattice
+    still fits the 12x12 cap.
     """
     shifts = []
     for k in range(m + 1):
         for i in range(max_shift + 1):
             for j in range(max_shift + 1):
                 if i + j == 0 and k == 0:
-                    continue  # k == 0 already contributes the plain N^m row
+                    continue  # the k == 0 row is added implicitly by the builder
                 shifts.append((i, j, k))
+    cache = {}
+
+    def width(i, j, k):
+        key = (i, j, k)
+        if key not in cache:
+            base = (poly2_pow(f, m) if k == m
+                    else poly2_scale(poly2_pow(f, k), N ** (m - k)))
+            cache[key] = len(poly2_shift_y(poly2_shift_x(base, i), j))
+        return cache[key]
+
+    rich = sorted(shifts, key=lambda s: (-width(*s), s[2], s[0] + s[1], s[0], s[1]))
+    balanced = sorted(shifts, key=lambda s: (-width(*s), max(s[0], s[1]), -s[2],
+                                             s[0] + s[1]))
+    by_power = sorted(shifts, key=lambda s: (-s[2], -width(*s), s[0] + s[1]))
     univ = [s for s in shifts if s[0] == 0 or s[1] == 0]
-    rest = [s for s in shifts if s not in univ]
-    low_first = sorted(univ) + sorted(rest, key=lambda s: (s[0] + s[1], s[2], s[0], s[1]))
-    balanced = sorted(univ) + sorted(rest, key=lambda s: (-s[2], max(s[0], s[1]),
-                                                          s[0] + s[1]))
-    small_first = sorted(univ) + sorted(rest, key=lambda s: (max(s[0], s[1]), s[2],
-                                                            s[0] + s[1]))
-    return [("univariate-first", univ + low_first),
-            ("low-first", low_first),
+    mixed = [s for s in rich if s not in univ]
+    return [("rich-first", rich),
+            ("univariate-then-rich", univ + mixed),
             ("balanced", balanced),
-            ("small-first", small_first)]
+            ("power-first", by_power)]
 
 
 def _candidate_lattices(f, N, m, t, max_shift=4):
@@ -1072,7 +1092,7 @@ def _candidate_lattices(f, N, m, t, max_shift=4):
     """
     out = []
     seen = set()
-    for label, order in _shift_orders(m, t, max_shift):
+    for label, order in _shift_orders(f, N, m, t, max_shift):
         rows, mon = _shift_polys(f, N, m, order)
         if rows is None:
             continue
@@ -1216,6 +1236,58 @@ def coppersmith_bivariate(f, N, X, Y, m=None, t=None, time_budget=60.0):
     return best
 
 
+def _resultant_stage(polys, X, Y, record, time_budget):
+    """Eliminate y pairwise and pull x-candidates out of the resultants
+
+    Three ways to read a root out of a univariate resultant R(x), tried in order because
+    which one succeeds depends on the instance:
+      1. R itself, when deg R is small (<= 6) - solved exactly by `_int_roots`;
+      2. the GCD over Q[x] of two resultants, when that GCD is small;
+      3. the same GCD but larger (<= 12), still worth an exact attempt.
+    Every candidate is then completed with a partner y and handed to `record`, which
+    re-verifies. Nothing here reports anything by itself.
+    """
+    if len(polys) < 2 or time.time() > time_budget:
+        return
+    res = []
+    seen_r = set()
+    for i in range(len(polys)):
+        for j in range(i + 1, len(polys)):
+            r = poly2_resultant(polys[i], polys[j], True)
+            if not r or len(r) < 2:
+                continue
+            prim = tuple(_poly_primitive(r))
+            if prim in seen_r:
+                continue
+            seen_r.add(prim)
+            res.append(list(prim))
+    cands = []
+    seen_c = set()
+
+    def offer(poly):
+        if not poly or not (1 <= len(poly) <= 12):
+            return
+        key = tuple(int(c) for c in poly)
+        if key in seen_c:
+            return
+        seen_c.add(key)
+        cands.append(list(key))
+
+    for r in res:
+        if len(r) <= 7:
+            offer(r)
+    for i in range(len(res)):
+        for j in range(i + 1, len(res)):
+            g = L._poly_gcd_rational(res[i], res[j])
+            if g:
+                offer([int(c) for c in g])
+    for g in cands:
+        for x0 in _int_roots(g, X):
+            for poly in polys:
+                for y0 in _solve_for_y(poly, x0, Y):
+                    record(x0, y0, poly)
+
+
 def _extract_roots(polys, f, N, X, Y, label, dim_r, dim_c, time_budget):
     """Turn the short-vector polynomials into verified roots (never a guess)"""
     detail = ("lattice %dx%d %s, %d usable polynomial(s)"
@@ -1244,36 +1316,7 @@ def _extract_roots(polys, f, N, X, Y, label, dim_r, dim_c, time_budget):
 
     # stage 1: pairwise resultants eliminate y, the GCD over Q[x] of two of them isolates
     # the x-coordinate of the common root (this is the path that actually works)
-    if len(polys) >= 2 and time.time() < time_budget:
-        res = []
-        seen_r = set()
-        for i in range(len(polys)):
-            for j in range(i + 1, len(polys)):
-                r = poly2_resultant(polys[i], polys[j], True)
-                if not r or len(r) < 2:
-                    continue
-                prim = tuple(_poly_primitive(r))
-                if prim in seen_r:
-                    continue
-                seen_r.add(prim)
-                res.append(list(prim))
-        gcds = []
-        seen_g = set()
-        for i in range(len(res)):
-            for j in range(i + 1, len(res)):
-                g = L._poly_gcd_rational(res[i], res[j])
-                if not g or not (1 <= len(g) <= 6):
-                    continue
-                key = tuple(int(c) for c in g)
-                if key in seen_g:
-                    continue
-                seen_g.add(key)
-                gcds.append(list(key))
-        for g in gcds:
-            for x0 in _int_roots(g, X):
-                for poly in polys:
-                    for y0 in _solve_for_y(poly, x0, Y):
-                        _record(x0, y0, poly)
+    _resultant_stage(polys, X, Y, _record, time_budget)
 
     # stage 2: the bilinear separator (exact quadratic, no lattice). It applies only when
     # the negation of f(x, -y) also vanishes at the root, which the RSA shape does not
