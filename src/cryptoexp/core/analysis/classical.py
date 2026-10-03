@@ -44,7 +44,21 @@ def _text_candidates(ctx: dict):
 
 
 def analyze_classical(ctx: dict) -> dict:
-    out = {"probes": [], "candidates": [], "notes": []}
+    out = {"probes": [], "candidates": [], "notes": [], "adfgvx": None}
+    # A stream built only of the ADFGX/ADFGVX labels is instantly recognisable, and the
+    # scoring below is useless on it (a fractionated coordinate stream looks like noise).
+    # Detection only: cracking needs a search (seconds to minutes), so it stays a library
+    # call (`cx.adfgvx_crack`) rather than something `analyze` runs on every target.
+    try:
+        from ...utils import adfgvx as _ADF
+        detection = _ADF.adfgvx_detect(ctx.get("raw_text") or "")
+    except Exception:                                  # a lead must never break a report
+        detection = None
+    if detection and detection.get("is_adfgvx"):
+        out["adfgvx"] = detection
+        out["notes"].append(
+            f"{detection['variant'].upper()} ciphertext detected "
+            f"({detection['why']}); recover the key with cx.adfgvx_crack(ciphertext)")
     chunks = _text_candidates(ctx)
     if not chunks:
         out["notes"].append("no sufficiently long alphabetic fragment, "

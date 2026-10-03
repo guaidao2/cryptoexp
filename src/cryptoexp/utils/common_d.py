@@ -28,13 +28,14 @@ result stays `ok=False` and the note names the range that was actually covered.
 """
 
 import itertools
+import random
 
 from . import algebra as A
 from . import lattice as L
 from . import rsa_ops as R
 
 
-# ---- the two stages
+# ---- input normalisation and the single acceptance test
 
 def _items(pairs):
     """Normalise [(e, n)] / [(e, n, c)] into [(e, n, c_or_None)]"""
@@ -94,8 +95,7 @@ def _factors_from_d(n, e, d, window):
         alpha //= 2
         t += 1
     if t:
-        import random as _random
-        rng = _random.Random(0xC0FFEE)
+        rng = random.Random(0xC0FFEE)
         bases = list(range(2, 20)) + [rng.randrange(2, n - 1) for _ in range(8)]
         for g in bases:
             gg = A.gcd(g, n)
@@ -127,10 +127,10 @@ def _verify_shared_d(d, items, window=None):
     candidate outright: a candidate that explains only some of the moduli is a
     coincidence, not the shared exponent.
 
-    `window` bounds the k-search inside `_factors_from_d`; when it is None the
-    window is derived from the size of `e*d` (adaptive, capped - the stage-2
-    factoring is what actually guarantees the answer, so the window only has to
-    be wide enough to be worth trying).
+    `window` bounds the k-search inside `_factors_from_d` before the stage-2
+    factoring is used (default 16, i.e. a cheap 33-value scan); the acceptance
+    never depends on that window being wide enough, because stage 2 needs no
+    estimate of k at all.
 
     Returns the list of (p_i, q_i) in input order when every modulus checks out,
     else None.
@@ -139,13 +139,9 @@ def _verify_shared_d(d, items, window=None):
         return None
     factors = []
     for e_i, n_i, _c in items:
-        if window is None:
-            # extra bits of e*d over n^2 - the relative error of k_est is s/n, so
-            # the absolute error is that many bits of k (see _factors_from_d)
-            extra = max(0, (e_i * d).bit_length() - 2 * n_i.bit_length())
-            win = min(1 << 16, 1 << min(extra, 16))
-        else:
-            win = window
+        # window=0 by default: the k-search only pays off for small d, and the
+        # stage-2 factoring below is what makes the test unconditional.
+        win = 16 if window is None else window
         pair = _factors_from_d(n_i, e_i, d, win)
         if pair is None or pair[0] * pair[1] != n_i:
             return None
@@ -243,17 +239,22 @@ def _candidates(reduced):
 def _measured_reach(bits, m):
     """Measured reach, from this repository's own runs at 512-bit moduli.
 
-    The lattice succeeds while the target is shorter than the shortest vector
-    the lattice can be expected to contain (its Gaussian heuristic), which puts
-    the practical edge near `n^((m+1)/(2m))` and does *not* follow the
-    optimistic `n^(m/(m+1))` shape. Measured (2 runs each):
-    m=2: no lattice recovery up to 2^260 (the convergent stage is better here);
-    m=3: recovers up to ~2^100, fails from 2^128 on;
-    m=4: recovers to ~2^150, fails from 2^170 on.
+    The lattice recovers d while the target vector is shorter than the shortest
+    vector the lattice can be expected to contain (its Gaussian heuristic). That
+    puts the practical edge near `n^((m+1)/(2m))`, *not* the optimistic
+    `n^(m/(m+1))` shape - at 512-bit moduli (bits of d, 3 instances per cell,
+    hit rate in brackets):
+
+        m=2: 2^100 [0/3], 2^128 [0/3]        - the convergent stage is as good
+        m=3: 2^100 [3/3], 2^128 [3/3], 2^150 [0/3]
+        m=4: 2^128 [3/3], 2^150 [3/3], 2^170 [0/3]
+
+    m=4/d~2^150 is the cell where this module beats the convergent stage
+    outright (3/3 against 0/3), which is the reason the stage exists.
     """
     if m <= 2:
-        return 96
-    return int(bits * (m + 1) / (2.0 * m))
+        return 0
+    return int(round(bits * (m + 1) / (2.0 * m)))
 
 
 def common_d_lattice(pairs, effort="normal"):
@@ -316,11 +317,12 @@ def common_d_lattice(pairs, effort="normal"):
                              f"moduli; refusing to report it as shared")
             continue
         factors = d_all
-        out = {"ok": True, "d": hit, "factors": factors,
+        out = {"ok": True, "plaintext": None, "plaintexts": None,
+               "factors": factors, "d": hit, "note": "",
                "detail": (f"SDAP lattice (dimension {len(basis)}) recovered the shared "
                           f"d ({hit.bit_length()} bits) from {m} moduli; the "
                           f"single-modulus Wiener bound does not cover it"),
-               "note": "", "dimension": len(basis), "tried": tried}
+               "dimension": len(basis), "tried": tried}
         if all(c is not None for _e, _n, c in items):
             msgs = []
             for (e_i, n_i, c_i), (p_i, q_i) in zip(items, factors):
@@ -334,13 +336,18 @@ def common_d_lattice(pairs, effort="normal"):
     reach = _measured_reach(bits, m)
     plain["tried"] = tried
     plain["plaintexts"] = [None] * m
+    if reach:
+        covered = (f"The lattice covers roughly 2^{reach} bits of d at these sizes "
+                   f"(n^((m+1)/(2m))-flavoured, not n^(m/(m+1)))")
+    else:
+        covered = ("At m=2 the lattice adds nothing measurable over the convergent "
+                   "stage at these sizes")
     plain["note"] = (
         f"no shared d found by the SDAP lattice ({bits}-bit moduli, {m} of them, "
         f"dimension {plain['dimension']}, {tried} reduced vectors examined). "
-        f"Measured range at 512-bit moduli: m=3 works to about 2^100 bits of d, "
-        f"m=4 to about 2^150; m=2 gets nothing the convergent stage does not "
-        f"already have. Reached here: about 2^{reach} bits of d "
-        f"(n^((m+1)/(2m))-flavoured estimate)")
+        f"Measured range at 512-bit moduli: m=2 gets nothing the convergent stage "
+        f"does not already have; m=3 recovers d up to about 2^128 bits; m=4 up to "
+        f"about 2^150 bits. " + covered)
     return plain
 
 
@@ -351,8 +358,9 @@ def common_d_attack(pairs, effort="normal"):
     continued-fraction convergent denominator of some `e_i / n_i`, which costs
     milliseconds and is unbeatable when it applies. Stage 2 is
     `common_d_lattice`, the SDAP/LLL version above, which is the one that keeps
-    working when d has grown past the convergent range (measured: 4 moduli of
-    512 bits, lattice recovers d ~ 2^150 where stage 1 is empty).
+    working when d has grown past the convergent range (measured at 512-bit
+    moduli: 4 moduli with d ~ 2^150 is 3/3 for the lattice against 0/3 for the
+    convergent stage).
 
     Returns the standard multi-modulus result dict; `detail` names the winning
     stage, so a caller can log which lead actually closed the case.

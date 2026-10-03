@@ -148,6 +148,10 @@ from .utils.linearize import (
     linearize, solve_linearized, recover_from_products, separate_variables,
     monomials_of, parse_monomial, check_solution,
 )
+from .utils.adfgvx import (
+    adfgx_square, adfgvx_square, adfgx_encrypt, adfgx_decrypt,
+    adfgvx_encrypt, adfgvx_decrypt, adfgvx_detect, adfgvx_crack,
+)
 from . import hypothesis
 from .hypothesis import (
     evaluate as evaluate_hypotheses, list_hypotheses, register_hypothesis,
@@ -254,6 +258,9 @@ _CANDIDATE_EXPORTS = [
     # small-root helpers: linearization lattice first, then the polynomial route
     "linearize", "solve_linearized", "recover_from_products", "separate_variables",
     "monomials_of", "parse_monomial",
+    # fractionating transposition ciphers (ADFGX / ADFGVX)
+    "adfgx_encrypt", "adfgx_decrypt", "adfgvx_encrypt", "adfgvx_decrypt",
+    "adfgvx_detect", "adfgvx_crack", "adfgx_square", "adfgvx_square",
     # RSA attacks (extra) / keys
     "franklin_reiter", "hastad_padded", "stereotyped_message",
     "parity_oracle_attack", "lsb_oracle_attack", "rsa_recover_d_from_factors",

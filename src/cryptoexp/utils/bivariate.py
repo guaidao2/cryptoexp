@@ -1108,12 +1108,14 @@ def _candidate_lattices(f, N, m, t, max_shift=4):
 
 # ────────────────────────── bivariate Coppersmith ──────────────────────────
 
-def _run_window(f, N, X, Y, rows, monomials, label, time_budget):
+def _run_window(f, N, X, Y, rows, monomials, label, deadline):
     """One full attack attempt over one shift lattice -> result dict
 
     Split out of `coppersmith_bivariate` so the ladder and the test harness drive the
-    same code path. Returns the library result dict; `ok` is only ever True when a root
-    has been verified by substitution.
+    same code path. `deadline` is an absolute time.time() value (NOT a duration - passing
+    a duration here silently disabled every extraction stage, because time.time() is
+    always far larger than any budget). Returns the library result dict; `ok` is only
+    ever True when a root has been verified by substitution.
     """
     dim_r, dim_c = len(rows), len(monomials)
     # lattice: column (i, j) holds the coefficient of x^i y^j times X^i Y^j
@@ -1154,7 +1156,7 @@ def _run_window(f, N, X, Y, rows, monomials, label, time_budget):
             poly[key] = v // s
         if ok and poly:
             polys.append(poly)
-    return _extract_roots(polys, f, N, X, Y, label, dim_r, dim_c, time_budget)
+    return _extract_roots(polys, f, N, X, Y, label, dim_r, dim_c, deadline)
 
 
 def coppersmith_bivariate(f, N, X, Y, m=None, t=None, time_budget=60.0):
@@ -1209,14 +1211,15 @@ def coppersmith_bivariate(f, N, X, Y, m=None, t=None, time_budget=60.0):
 
     # try every lattice the greedy builder can reach, widest first, and stop at the first
     # verified root; the labels of what was tried end up in the failure note
+    deadline = t0 + time_budget
     tried = []
     best = None
     skipped = 0
     for label, rows, monomials in _candidate_lattices(f, N, m, t):
-        if time.time() - t0 > time_budget:
+        if time.time() > deadline:
             break
         tried.append("%s" % label)
-        res = _run_window(f, N, X, Y, rows, monomials, label, time_budget)
+        res = _run_window(f, N, X, Y, rows, monomials, label, deadline)
         if res.get("skipped"):
             skipped += 1
             continue
@@ -1236,7 +1239,7 @@ def coppersmith_bivariate(f, N, X, Y, m=None, t=None, time_budget=60.0):
     return best
 
 
-def _resultant_stage(polys, X, Y, record, time_budget):
+def _resultant_stage(polys, X, Y, record, deadline):
     """Eliminate y pairwise and pull x-candidates out of the resultants
 
     Three ways to read a root out of a univariate resultant R(x), tried in order because
@@ -1247,7 +1250,7 @@ def _resultant_stage(polys, X, Y, record, time_budget):
     Every candidate is then completed with a partner y and handed to `record`, which
     re-verifies. Nothing here reports anything by itself.
     """
-    if len(polys) < 2 or time.time() > time_budget:
+    if len(polys) < 2 or time.time() > deadline:
         return
     res = []
     seen_r = set()
@@ -1288,8 +1291,11 @@ def _resultant_stage(polys, X, Y, record, time_budget):
                     record(x0, y0, poly)
 
 
-def _extract_roots(polys, f, N, X, Y, label, dim_r, dim_c, time_budget):
-    """Turn the short-vector polynomials into verified roots (never a guess)"""
+def _extract_roots(polys, f, N, X, Y, label, dim_r, dim_c, deadline):
+    """Turn the short-vector polynomials into verified roots (never a guess)
+
+    `deadline` is an absolute time.time() value.
+    """
     detail = ("lattice %dx%d %s, %d usable polynomial(s)"
               % (dim_r, dim_c, label, len(polys)))
     verified = []
@@ -1316,19 +1322,19 @@ def _extract_roots(polys, f, N, X, Y, label, dim_r, dim_c, time_budget):
 
     # stage 1: pairwise resultants eliminate y, the GCD over Q[x] of two of them isolates
     # the x-coordinate of the common root (this is the path that actually works)
-    _resultant_stage(polys, X, Y, _record, time_budget)
+    _resultant_stage(polys, X, Y, _record, deadline)
 
     # stage 2: the bilinear separator (exact quadratic, no lattice). It applies only when
     # the negation of f(x, -y) also vanishes at the root, which the RSA shape does not
     # always satisfy, so it is an opportunistic extra - never the only path.
-    if not verified and time.time() < time_budget:
+    if not verified and time.time() < deadline:
         for (x0, y0) in _bilinear_candidates(f, X, Y):
             for poly in polys:
                 _record(x0, y0, poly)
 
     # stage 3: modulo a few small primes - the true integer root must be congruent to a
     # root of every short polynomial modulo each prime; cheap and it prunes hard
-    if not verified and time.time() < time_budget:
+    if not verified and time.time() < deadline:
         for (x0, y0) in _candidates_mod_prime(polys, X, Y):
             for poly in polys:
                 if poly2_eval(poly, x0, y0) == 0:
