@@ -33,9 +33,18 @@ def _lit(v):
     return repr(v)
 
 
-def build_workbench(results: dict, params: dict = None, hypotheses: dict = None) -> str:
-    """Render the workbench script as text"""
+def build_workbench(results: dict, params: dict = None, hypotheses: dict = None,
+                    max_layers: int = None) -> str:
+    """Render the workbench script as text
+
+    max_layers: decode-chain depth baked into the generated `try_decode_chain()`
+        (None = `encoding.DEFAULT_CHAIN_LAYERS`, i.e. 3). The generated script reads
+        it back from `cx.encoding.DEFAULT_CHAIN_LAYERS`, so editing that one constant
+        in the workbench changes the depth without touching the loop.
+    """
     from .hypothesis import params_from_ctx, evaluate
+    from .utils.encoding import DEFAULT_CHAIN_LAYERS
+    depth = int(max_layers if max_layers is not None else DEFAULT_CHAIN_LAYERS)
     ctx = results.get("_ctx") or {}
     params = params or params_from_ctx(ctx)
     hy = hypotheses or evaluate(params, budget="full")
@@ -88,6 +97,10 @@ def build_workbench(results: dict, params: dict = None, hypotheses: dict = None)
     lines += [
         "",
         "# ─────────────────── starter snippets (pick one and keep going) ───────────────────",
+        # The depth the analysis actually used. `cx.encoding.DEFAULT_CHAIN_LAYERS` is
+        # the same constant the analyzers read, so raising it here raises it for the
+        # chain below (a chain that stops at the cap reports hit_limit=True).
+        f"MAX_LAYERS = {depth}   # == cx.encoding.DEFAULT_CHAIN_LAYERS",
         "def try_rsa_auto():",
         "    r = auto_attack(PARAMS.get('n'), PARAMS.get('e', 65537), PARAMS.get('c'))",
         "    print('auto_attack:', r['ok'], r.get('detail') or r.get('note'))",
@@ -97,8 +110,9 @@ def build_workbench(results: dict, params: dict = None, hypotheses: dict = None)
         "",
         "def try_decode_chain():",
         "    for b in BLOBS:",
-        "        for c in decode_chain(b, max_layers=3)[:3]:",
-        "            print('→'.join(c['steps']), c['score'], c['flags'], c['text'][:60])",
+        "        for c in decode_chain(b, max_layers=MAX_LAYERS)[:3]:",
+        "            print('→'.join(c['steps']), c['score'], c['flags'],",
+        "                  'hit_limit' if c['hit_limit'] else '', c['text'][:60])",
         "",
         "def try_xor():",
         "    for b in BLOBS:",
@@ -133,13 +147,16 @@ def build_workbench(results: dict, params: dict = None, hypotheses: dict = None)
 
 
 def write_workbench(results: dict, out_dir: str = "lab", params: dict = None,
-                    hypotheses: dict = None) -> str:
-    """Drop the workbench script on disk and return its path"""
+                    hypotheses: dict = None, max_layers: int = None) -> str:
+    """Drop the workbench script on disk and return its path
+
+    `max_layers` is forwarded to `build_workbench` (decode-chain depth).
+    """
     target = str(results.get("target") or "target")
     base = os.path.basename(target.rstrip("\\/")) or "target"
     base = "".join(ch for ch in base if ch.isalnum() or ch in "._-") or "target"
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"workbench_{base}.py")
     with open(path, "w", encoding="utf-8") as f:
-        f.write(build_workbench(results, params, hypotheses))
+        f.write(build_workbench(results, params, hypotheses, max_layers=max_layers))
     return path

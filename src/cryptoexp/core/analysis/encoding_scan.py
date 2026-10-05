@@ -5,9 +5,27 @@ Each blob is processed alone; it yields candidates, never verdicts.
 
 from ...utils import encoding as E
 
+# Fields copied out of a decode-chain result. `hit_limit` is part of the view on
+# purpose: a truncated chain must be visible as data, not only as a lower score.
+_CHAIN_FIELDS = ("steps", "score", "confidence", "flags", "hit_limit")
 
-def analyze_encoding(ctx: dict, max_blobs: int = 20, effort: str = "normal") -> dict:
+
+def analyze_encoding(ctx: dict, max_blobs: int = 20, effort: str = "normal",
+                     max_layers: int = E.DEFAULT_CHAIN_LAYERS, alphabets=None,
+                     guess_alphabets: bool = False) -> dict:
     """Encoding / xor analysis
+
+    max_layers: how deep `decode_chain` may peel. Default
+        `encoding.DEFAULT_CHAIN_LAYERS` (3). Raise it when a truncated chain is
+        suspected - every chain entry carries `hit_limit: True` when the cap was
+        reached and the result could still be decoded further.
+    alphabets: opt-in list of 64-character base64 alphabets to also try while
+        decoding (see `encoding.decode_chain`). Default None = off, byte-identical
+        to the previous behaviour.
+    guess_alphabets: opt-in cross-line heuristic - when a line is 64 +/- 1
+        characters with >= 60 distinct characters, treat it as a substitution
+        table, translate the other lines with it and run the normal chain plus
+        readability scoring. Default False (off).
 
     Performance tradeoff (measured): full 256-key repeating-xor with multi-start hill
     climbing is valuable but slow, and running it on every blob drags one analysis into
@@ -19,11 +37,26 @@ def analyze_encoding(ctx: dict, max_blobs: int = 20, effort: str = "normal") -> 
     everything) or call the library directly.
     """
     out = {"blobs": [], "candidates": [], "notes": []}
+    # Cross-line structure first: its table may also be the alphabet for the
+    # per-blob chains below, so detect once and reuse.
+    swapped = E.swapped_alphabet_analysis(ctx, max_layers=max_layers,
+                                          alphabets=alphabets) if guess_alphabets \
+        else {"alphabets": [], "levels": [], "candidates": [], "notes": []}
+    out["swapped_alphabets"] = swapped
+    if swapped["candidates"]:
+        out["candidates"].extend(swapped["candidates"])
+    for note in swapped["notes"]:
+        out["notes"].append(note)
+    chain_alphabets = list(alphabets or [])
+    for entry in swapped["alphabets"]:
+        if entry["alphabet"] not in chain_alphabets:
+            chain_alphabets.append(entry["alphabet"])
+
     blobs = ctx.get("blobs", [])[:max_blobs]
     if not blobs:
         out["notes"].append("no suspected encoded/ciphertext string found")
         return out
-    solved = False
+    solved = bool(swapped["candidates"])
     # Repeating xor is valuable but slow: by default give only the first decent blob one
     # **full** attempt (measured: a reduced configuration became the root cause of
     # "cannot solve it", while running more blobs only burns time)
@@ -59,10 +92,9 @@ def analyze_encoding(ctx: dict, max_blobs: int = 20, effort: str = "normal") -> 
             out["blobs"].append(entry)
             continue
 
-        # 1) Multi-layer decode chain
-        chain = E.decode_chain(text, max_layers=3)
-        entry["chain"] = [{k: c[k] for k in ("steps", "score", "confidence", "flags")}
-                          for c in chain[:3]]
+        # 1) Multi-layer decode chain (3 layers unless the caller asked for more)
+        chain = E.decode_chain(text, max_layers=max_layers, alphabets=chain_alphabets)
+        entry["chain"] = [{k: c[k] for k in _CHAIN_FIELDS} for c in chain[:3]]
         for rank, c in enumerate(chain[:2]):
             # Top candidate only: that is E.confidence_of's highest tier
             # (a strict flag hit; a score alone now caps at medium)
@@ -71,7 +103,9 @@ def analyze_encoding(ctx: dict, max_blobs: int = 20, effort: str = "normal") -> 
                     "attack": "decode_chain:" + "→".join(c["steps"]),
                     "data": c["data"], "confidence": c["confidence"],
                     "detail": f"score {c['score']} ({blob['source']})"
-                              + (f" ({c['note']})" if c.get("note") else ""),
+                              + (f" ({c['note']})" if c.get("note") else "")
+                              + (" [hit the %d-layer cap: still decodable]"
+                                 % max_layers if c.get("hit_limit") else ""),
                 })
                 solved = solved or bool(c["flags"])
 

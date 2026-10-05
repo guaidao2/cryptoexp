@@ -16,6 +16,7 @@ of disassembly.
 """
 
 from ..context import build_context, context_public
+from ...utils.encoding import DEFAULT_CHAIN_LAYERS
 from .encoding_scan import analyze_encoding
 from .classical import analyze_classical
 from .rsa import analyze_rsa
@@ -74,7 +75,8 @@ def probe_optional_deps() -> dict:
 
 def analyze_all(target: str, skip_encoding: bool = False,
                 effort: str = "normal", flag_prefixes=None,
-                flag_pattern=None) -> dict:
+                flag_pattern=None, max_layers: int = None,
+                alphabets=None, guess_alphabets: bool = False) -> dict:
     """Full analysis entry point → results dict (English keys)
 
     effort: fast (cheap checks only) / normal (default) / max (no early stop, try everything)
@@ -84,23 +86,42 @@ def analyze_all(target: str, skip_encoding: bool = False,
         duration (that is what makes the analyzers' own flag detection agree with
         verification). Library callers who want no global state should use
         encoding.flag_candidates(data, prefixes=[...]) directly.
+    max_layers: how many layers the built-in decode chain may peel (None = the
+        library default, `utils.encoding.DEFAULT_CHAIN_LAYERS` = 3). Raise it when a
+        chain entry comes back with `hit_limit: True`; that flag means the chain
+        consumed the whole cap and the result was still decodable.
+    alphabets: opt-in list of 64-character base64 alphabets to also try while
+        decoding (custom/shuffled tables). Default None = off, which is
+        byte-identical to the previous behaviour.
+    guess_alphabets: opt-in cross-line heuristic - a line of 64 +/- 1 characters
+        with >= 60 distinct characters is treated as a substitution table for the
+        other lines. Default False = off. The result lands under
+        `results["encoding"]["swapped_alphabets"]`, and anything it reports is a
+        normal candidate graded by score.
     """
     from ...utils import encoding as _E
+    layers = _E.DEFAULT_CHAIN_LAYERS if max_layers is None else int(max_layers)
+    if layers < 1:
+        raise ValueError("max_layers must be >= 1")
+    tables = _E.check_alphabets(alphabets)
     token = None
     if flag_prefixes is not None or flag_pattern is not None:
         # Scoped to this run: analyzers and verification see it, other callers do not.
         token = _E.push_flag_config(flag_prefixes, flag_pattern)
     try:
         return _analyze_scoped(target, skip_encoding, effort, flag_prefixes,
-                               flag_pattern)
+                               flag_pattern, layers, tables, guess_alphabets)
     finally:
         if token is not None:
             _E.pop_flag_config(token)
 
 
 def _analyze_scoped(target: str, skip_encoding: bool, effort: str,
-                    flag_prefixes, flag_pattern) -> dict:
+                    flag_prefixes, flag_pattern, max_layers: int = None,
+                    alphabets=None, guess_alphabets: bool = False) -> dict:
     """analyze_all body; the flag config is already scoped by the caller"""
+    from ...utils import encoding as _E
+    layers = _E.DEFAULT_CHAIN_LAYERS if max_layers is None else int(max_layers)
     ctx = build_context(target)
     results = {
         "target": target,
@@ -109,11 +130,17 @@ def _analyze_scoped(target: str, skip_encoding: bool, effort: str,
         "effort": effort,
         "flag_prefixes": flag_prefixes,
         "flag_pattern": flag_pattern,
+        "max_layers": layers,
+        "alphabets": alphabets,
+        "guess_alphabets": bool(guess_alphabets),
         "_ctx": ctx,
     }
 
     results["encoding"] = {"blobs": [], "candidates": [], "notes": ["skipped"]} \
-        if skip_encoding else analyze_encoding(ctx, effort=effort)
+        if skip_encoding else analyze_encoding(ctx, effort=effort,
+                                               max_layers=layers,
+                                               alphabets=alphabets,
+                                               guess_alphabets=guess_alphabets)
     if ctx.get("source_like"):
         # Score-based probes on code are pure noise (`import gmpy2` scored as a caesar
         # candidate). The encodings inside a script are still analysed by the encoding
@@ -140,7 +167,10 @@ def _analyze_scoped(target: str, skip_encoding: bool, effort: str,
     # above; for a full run see cryptoexp.py hypotheses / lab.
     try:
         from ..hypothesis import params_from_ctx, evaluate
-        results["hypotheses"] = evaluate(params_from_ctx(ctx), budget="list")
+        # The chain depth and any supplied alphabets travel with the params, so the
+        # decode_chain hypothesis peels exactly as deep as the analyzer did.
+        results["hypotheses"] = evaluate(
+            params_from_ctx(ctx, max_layers=layers, alphabets=alphabets), budget="list")
     except Exception as e:
         results["hypotheses"] = {"applicable": [], "gaps": [],
                                  "results": [], "error": str(e)}
@@ -153,5 +183,5 @@ def _analyze_scoped(target: str, skip_encoding: bool, effort: str,
 __all__ = [
     "analyze_all", "build_context", "context_public",
     "register_analyzer", "list_analyzers", "run_extra_analyzers",
-    "probe_optional_deps",
+    "probe_optional_deps", "DEFAULT_CHAIN_LAYERS",
 ]

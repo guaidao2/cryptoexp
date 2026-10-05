@@ -49,8 +49,15 @@ def list_hypotheses():
 
 # ────────────────────────── parameter normalisation ──────────────────────────
 
-def params_from_ctx(ctx: dict) -> dict:
-    """Normalise the blackboard ctx into the parameter dict the engine consumes"""
+def params_from_ctx(ctx: dict, max_layers: int = None, alphabets=None) -> dict:
+    """Normalise the blackboard ctx into the parameter dict the engine consumes
+
+    max_layers: how deep the `decode_chain` hypothesis may peel (None = the library
+        default, `encoding.DEFAULT_CHAIN_LAYERS`). Carried in the params as
+        `max_layers`, which is what `_run_decode` reads.
+    alphabets: opt-in base64 alphabets handed to `decode_chain`; validated there
+        (raise early so a bad table is reported at the call, not inside a hypothesis).
+    """
     from .core.analysis.rsa import collect_params
     raw = collect_params(ctx)
     p = {
@@ -64,6 +71,9 @@ def params_from_ctx(ctx: dict) -> dict:
         "datas": [d["data"] for d in ctx.get("data", []) if len(d.get("data", b"")) >= 16],
         "blobs": [b["text"] for b in ctx.get("blobs", [])],
         "flags_found": [],
+        "max_layers": int(max_layers if max_layers is not None
+                          else E.DEFAULT_CHAIN_LAYERS),
+        "alphabets": E.check_alphabets(alphabets) or None,
     }
     named = ctx.get("named", {})
     g = next((named[k][0] for k in named if k in ("g", "generator", "base")), None)
@@ -430,11 +440,20 @@ register_hypothesis(
 
 
 def _run_decode(d):
+    # The layer cap comes from the params (`params["max_layers"]`, set by
+    # `params_from_ctx(max_layers=...)`), so the CLI / workbench / a caller can all
+    # ask for a deeper peel without editing this module. Default stays
+    # `E.DEFAULT_CHAIN_LAYERS` (3).
+    max_layers = int(d.get("max_layers") or E.DEFAULT_CHAIN_LAYERS)
+    alphabets = d.get("alphabets") or None
     for blob in d["blobs"][:10]:
-        chain = E.decode_chain(blob, max_layers=3)
+        chain = E.decode_chain(blob, max_layers=max_layers, alphabets=alphabets)
         if chain and (chain[0]["flags"] or chain[0]["score"] >= 70):
             return {"ok": True, "plaintext": chain[0]["data"],
-                    "detail": f"{'→'.join(chain[0]['steps'])} (score {chain[0]['score']})"}
+                    "detail": f"{'→'.join(chain[0]['steps'])} "
+                              f"(score {chain[0]['score']}"
+                              + (f", hit the {max_layers}-layer cap"
+                                 if chain[0].get("hit_limit") else "") + ")"}
     return {"ok": False, "note": "no high-scoring decode chain"}
 
 

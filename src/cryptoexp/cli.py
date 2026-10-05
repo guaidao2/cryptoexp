@@ -19,6 +19,22 @@ from .core.verify import verify_candidates
 from .core.solve import generate as gen_solve, list_solvers
 
 
+def _parse_alphabets(raw):
+    """`--alphabets TABLE` (repeatable) -> [TABLE, ...]; empty -> None (feature off)
+
+    Each repeat is one whole alphabet, comma-separated pieces are also accepted.
+    Validated later by `encoding.check_alphabets`, which names the offending table.
+    """
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        raw = [raw]
+    items = []
+    for chunk in raw:
+        items.extend(p.strip() for p in str(chunk).split(",") if p.strip())
+    return items or None
+
+
 def _json_error(message: str) -> int:
     """Error path for JSON consumers: stdout stays a JSON document, not a text line"""
     print(json.dumps({"schema_version": "1.0", "error": message}, ensure_ascii=True,
@@ -30,7 +46,10 @@ def _run_one(target: str, args) -> dict:
     results = analyze_all(target, skip_encoding=args.no_encoding,
                           effort=getattr(args, "effort", "normal"),
                           flag_prefixes=getattr(args, "flag_prefix", None),
-                          flag_pattern=getattr(args, "flag_regex", None))
+                          flag_pattern=getattr(args, "flag_regex", None),
+                          max_layers=getattr(args, "max_layers", None),
+                          alphabets=_parse_alphabets(getattr(args, "alphabets", None)),
+                          guess_alphabets=getattr(args, "guess_alphabets", False))
     verification = verify_candidates(results)
     results["verification"] = verification
 
@@ -128,7 +147,7 @@ def cmd_hypotheses(args):
     from .core.context import build_context
 
     ctx = build_context(args.target)
-    params = params_from_ctx(ctx)
+    params = params_from_ctx(ctx, max_layers=getattr(args, "max_layers", None))
     result = evaluate(params, budget="full")
 
     if args.json:
@@ -166,11 +185,14 @@ def cmd_lab(args):
     from .lab import write_workbench
     from .hypothesis import params_from_ctx, evaluate
 
-    results = analyze_all(args.target, skip_encoding=args.no_encoding)
-    params = params_from_ctx(results.get("_ctx") or {})
+    results = analyze_all(args.target, skip_encoding=args.no_encoding,
+                          max_layers=getattr(args, "max_layers", None))
+    params = params_from_ctx(results.get("_ctx") or {},
+                             max_layers=getattr(args, "max_layers", None))
     hypotheses = evaluate(params, budget="full" if args.deep else "list")
     path = write_workbench(results, out_dir=args.out, params=params,
-                           hypotheses=hypotheses)
+                           hypotheses=hypotheses,
+                           max_layers=getattr(args, "max_layers", None))
     print_success(f"workbench script: {path}")
     print_info("open it: parameters are already extracted, applicable hypotheses and gaps "
                "are written in comments, and the starting moves are ready to call")
@@ -234,6 +256,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--flag-regex", metavar="REGEX",
                    help="a regex that replaces the prefix list entirely, for marker "
                         "formats that are not PREFIX{...}")
+    p.add_argument("--max-layers", type=int, metavar="N", default=None,
+                   help="decode-chain depth for the encoding analyzer "
+                        "(default: encoding.DEFAULT_CHAIN_LAYERS = 3). Re-run with a "
+                        "higher N when a chain entry reports hit_limit")
+    p.add_argument("--alphabets", action="append", metavar="TABLE",
+                   help="opt-in 64-character base64 alphabet to also try while "
+                        "decoding, repeatable (default: off). A wrong table cannot "
+                        "reach high confidence without a known flag prefix")
+    p.add_argument("--guess-alphabets", action="store_true",
+                   help="opt-in cross-line heuristic: treat a line of 64 +/- 1 "
+                        "characters with >= 60 distinct characters as a base64 "
+                        "substitution table for the other lines (default: off)")
 
     sub.add_parser("list", help="list analyzers and solve templates")
 
@@ -241,6 +275,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="run the hypothesis engine end to end (attack surface + gaps)")
     p.add_argument("target", help="challenge file/directory/challenge text")
     p.add_argument("--json", action="store_true", help="JSON output")
+    p.add_argument("--max-layers", type=int, metavar="N", default=None,
+                   help="decode-chain depth used by the decode_chain hypothesis "
+                        "(default: encoding.DEFAULT_CHAIN_LAYERS = 3)")
 
     p = sub.add_parser("lab",
                        help="generate a workbench scaffold (start here for long-tail challenges)")
@@ -250,6 +287,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="try every hypothesis while generating (slow)")
     p.add_argument("--run", action="store_true", help="run it once right after generating")
     p.add_argument("--no-encoding", action="store_true", help="skip encoding/XOR analysis")
+    p.add_argument("--max-layers", type=int, metavar="N", default=None,
+                   help="decode-chain depth baked into the generated workbench and "
+                        "used by this analysis (default: DEFAULT_CHAIN_LAYERS = 3)")
     return parser
 
 

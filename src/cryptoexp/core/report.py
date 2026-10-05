@@ -20,11 +20,24 @@ _RENDERED_KEYS = {
     "target", "context", "env", "effort", "encoding", "classical", "rsa",
     "symmetric", "numbertheory", "lattice", "strategy", "summary",
     "verification", "hypotheses", "_ctx",
+    # New scalar settings are surfaced through `decode_chain` / `swapped_alphabet`
+    # in the JSON contract, so the text report does not need a plugin-looking block
+    # that prints "guess_alphabets: True" as if it were an analyzer.
+    "max_layers", "alphabets", "guess_alphabets",
 }
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 _SEVERITY_COLOR = {"critical": Colors.RED, "high": Colors.RED, "medium": Colors.YELLOW,
                    "low": Colors.GREEN, "info": Colors.CYAN}
+
+
+def enc_layers(results: dict) -> int:
+    """The chain depth this run actually used (for the hit_limit warning text)"""
+    from ..utils.encoding import DEFAULT_CHAIN_LAYERS
+    try:
+        return int(results.get("max_layers") or DEFAULT_CHAIN_LAYERS)
+    except (TypeError, ValueError):
+        return DEFAULT_CHAIN_LAYERS
 
 
 def _fmt_value(v, indent: int = 2):
@@ -99,6 +112,12 @@ def print_results(results: dict, verification: dict = None):
                 c = b["chain"][0]
                 print_field("decode chain",
                             f"{'->'.join(c['steps'])} (score {c['score']}, {c['confidence']})")
+                # A truncated chain is not a failed one: say so, so the caller can
+                # re-run with a higher max_layers instead of trusting the ranking.
+                if c.get("hit_limit"):
+                    print_warning(f"decode chain stopped at the {enc_layers(results)}-layer "
+                                  f"cap and is still decodable - re-run with a higher "
+                                  f"max_layers")
             if b["xor"]:
                 x = b["xor"][0]["top"][0]
                 print_field("single-byte xor", f"key=0x{x['key']:02x} score {x['score']}")
@@ -107,6 +126,21 @@ def print_results(results: dict, verification: dict = None):
                 print_field("repeating xor",
                             f"keylen={r['keysize']} key={r['key']!r} score {r['score']}")
         print_field("candidates", len(enc.get("candidates", [])))
+
+    swapped = enc.get("swapped_alphabets") or {}
+    for entry in swapped.get("alphabets", [])[:4]:
+        print_section_header("Cross-line swapped base64 alphabet")
+        print_field("candidate", f"{entry['source']} ({entry['unique']} unique characters)")
+        print_field("alphabet", entry["alphabet"][:64])
+        for lvl in entry.get("levels", [])[:2]:
+            print_field("decoded", f"{lvl['view']} score {lvl['score']} "
+                                   f"-> {lvl['preview'][:60]!r}")
+            if lvl.get("chain"):
+                c = lvl["chain"][0]
+                print_field("chain", f"{'->'.join(c['steps'])} (score {c['score']}, "
+                                     f"{c['confidence']})")
+        if not entry.get("levels"):
+            print_warning("table candidate only: no other line is a valid base64 body in it")
 
     cla = results.get("classical") or {}
     if cla.get("probes"):
@@ -246,6 +280,30 @@ def json_summary(results: dict, verification: dict = None) -> dict:
         cands.append({"source": c.get("source"), "attack": c.get("attack"),
                       "confidence": c.get("confidence"),
                       "detail": c.get("detail"), "preview": str(data)[:200]})
+    # The decode-chain cap and whether any chain hit it: a JSON consumer needs both
+    # to decide "re-run with a higher max_layers" without guessing from the score.
+    enc = results.get("encoding") or {}
+    limited = [{"steps": c.get("steps"), "score": c.get("score"),
+                "source": b.get("source")}
+               for b in enc.get("blobs", []) for c in b.get("chain", [])
+               if c.get("hit_limit")]
+    # Cross-line swapped-alphabet evidence, lifted out of the encoding block: a
+    # caller needs "which line was taken as the table" and "what it decoded to".
+    swapped = enc.get("swapped_alphabets") or {}
+    swapped_out = {
+        "alphabets": [{"line": e.get("line"), "source": e.get("source"),
+                       "unique": e.get("unique"), "alphabet": e.get("alphabet"),
+                       "levels": [{"view": l.get("view"), "score": l.get("score"),
+                                   "flags": l.get("flags"),
+                                   "preview": (l.get("preview") or "")[:120]}
+                                  for l in e.get("levels", [])]}
+                      for e in swapped.get("alphabets", [])],
+        "candidates": [{"attack": c.get("attack"), "confidence": c.get("confidence"),
+                        "detail": c.get("detail"),
+                        "preview": str(c.get("data", b""))[:200]}
+                       for c in swapped.get("candidates", [])],
+        "notes": swapped.get("notes", []),
+    }
     extra = {k: v for k, v in results.items()
              if k not in _RENDERED_KEYS and not k.startswith("_")
              and isinstance(v, (dict, list, str, int, float, bool))}
@@ -262,6 +320,15 @@ def json_summary(results: dict, verification: dict = None) -> dict:
         "numbertheory": results.get("numbertheory"),
         "lattice": results.get("lattice"),
         "candidates": cands,
+        "decode_chain": {
+            "max_layers": enc_layers(results),
+            # The custom alphabets this run was given (empty = opt-in feature off).
+            "alphabets": list(results.get("alphabets") or []),
+            "guess_alphabets": bool(results.get("guess_alphabets")),
+            "hit_limit": bool(limited),
+            "limited": limited,
+        },
+        "swapped_alphabet": swapped_out,
         "findings": (results.get("summary") or {}).get("items", []),
         "max_severity": (results.get("summary") or {}).get("max_severity"),
         "strategy": results.get("strategy"),

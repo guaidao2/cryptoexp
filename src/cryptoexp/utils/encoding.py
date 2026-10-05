@@ -551,21 +551,295 @@ _DECODERS = (
     ("binary", from_binary_string),
 )
 
+# How deep the *analyzers* peel an encoding chain when the caller does not say.
+# `decode_chain` itself takes `max_layers` directly; this is the one place the
+# built-in analysis path reads its cap from, so CLI / analyzer / hypothesis / lab
+# cannot drift apart again (three call sites used to hardcode 3 independently).
+DEFAULT_CHAIN_LAYERS = 3
 
-def decode_chain(blob: str, max_layers: int = 3, min_score: float = 55.0):
+# ------------------------------------------------------------------ swappable base64
+# The library deliberately does not *guess* base64 alphabets: a blind search over
+# 64! permutations is not a search, it is noise. What it does support is a caller
+# handing in alphabets ("I know this challenge uses a shuffled table", "here are the
+# 3 tables from the statement"), and the cross-line heuristic below for the very
+# common "line 1 is the table, line 2 is the ciphertext" layout.
+_ALPHABET_LEN = 64
+# The cross-line heuristic window: 64 +/- 1 characters (a table typed with one extra
+# or missing character is still worth trying - the translation then simply has one
+# unmapped character). See `guess_alphabet_candidates` for the measured behaviour.
+_ALPHABET_LEN_SLACK = 1
+# How many distinct characters a line must contain before it is worth treating as a
+# substitution table. A real table has all 64; ordinary prose rarely passes 45.
+_MIN_ALPHABET_UNIQUE = 60
+# Decoded text must reach this score before a line is reported as a *candidate*
+# (the same bar the single-byte and repeating-xor paths use).
+_ALPHABET_MIN_SCORE = 70.0
+# "Readable enough to stop looking" for the `hit_limit` rule: at or above this a
+# truncated chain has already produced something a human would accept.
+_PLAIN_SCORE = 70.0
+# How many lines of a payload are considered, and how much of each line is kept.
+_ALPHABET_MAX_LINES = 40
+_ALPHABET_LINE_KEEP = 200
+
+
+def check_alphabets(alphabets):
+    """Validate caller-supplied base64 alphabets -> list of 64-character strings
+
+    Raises ValueError for anything that is not a 64-character permutation of one
+    character per base64 value. Being strict here is the point: a wrongly sized
+    alphabet silently produces garbage that then has to be explained by a score,
+    and "garbage with a medium score" is exactly the misreport this library avoids.
+    """
+    if alphabets is None:
+        return []
+    out = []
+    for idx, raw in enumerate(alphabets):
+        if isinstance(raw, (bytes, bytearray)):
+            raw = bytes(raw).decode('latin-1')
+        if not isinstance(raw, str):
+            raise ValueError(f"alphabet #{idx} is not a string: {type(raw).__name__}")
+        if len(raw) != _ALPHABET_LEN or len(set(raw)) != _ALPHABET_LEN:
+            raise ValueError(f"alphabet #{idx} must be {_ALPHABET_LEN} unique "
+                             f"characters (got {len(raw)} chars, "
+                             f"{len(set(raw))} unique)")
+        if any(ch.isspace() or ch == '=' for ch in raw):
+            raise ValueError(f"alphabet #{idx} must not contain whitespace or '=' "
+                             f"(the pad character is added by the decoder)")
+        out.append(raw)
+    return out
+
+
+def _swap_table(alphabet: str):
+    """str.translate table: custom alphabet character -> standard base64 character"""
+    std = string.ascii_uppercase + string.ascii_lowercase + string.digits + "+/"
+    return str.maketrans(alphabet, std)
+
+
+def decode_with_alphabet(s: str, alphabet: str):
+    """Decode a base64 body written in a custom alphabet
+
+    The custom alphabet is mapped character-by-character onto the standard one
+    (`'A'..'/'`), then normal base64 decoding applies. Returns None when the string
+    contains a character outside the alphabet or the body cannot be decoded - the
+    same "candidate or nothing" contract as the other single-layer decoders.
+    """
+    t = re.sub(r'\s', '', s or '')
+    if len(t) < 4:
+        return None
+    t = t.rstrip('=')
+    if not t or any(ch not in alphabet for ch in t):
+        return None
+    mapped = t.translate(_swap_table(alphabet))
+    mapped += '=' * (-len(mapped) % 4)
+    try:
+        return base64.b64decode(mapped, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def _make_swap_decoder(alphabet: str):
+    def _swap(s: str):
+        return decode_with_alphabet(s, alphabet)
+    return _swap
+
+
+def guess_alphabet_candidates(text: str):
+    """Lines that plausibly are a base64 substitution table -> sorted unique list
+
+    Heuristic, and tuned as one: a line qualifies when it holds at least 60 distinct
+    characters and is 64 +/- 1 characters long. Both halves earn their place -
+    measured on ordinary prose the unique-character count is the real filter (an
+    English line sits near 30-45 distinct characters), the length window only keeps
+    a table that was typed one character short/long from being thrown away.
+
+    This is a **heuristic, not a proof**: it can only tell "this line is the right
+    shape to be a table". Whether the table actually decodes anything is decided
+    downstream by the decoded text's score (`swapped_alphabet_analysis`), and the
+    line stays named in the evidence either way.
+    """
+    out, seen = [], set()
+    for lineno, line in enumerate((text or "").splitlines(), 1):
+        t = re.sub(r'\s', '', line)
+        if abs(len(t) - _ALPHABET_LEN) > _ALPHABET_LEN_SLACK:
+            continue
+        uniq = len(set(t))
+        if uniq < _MIN_ALPHABET_UNIQUE:
+            continue
+        key = ''.join(sorted(t))
+        if key in seen:      # two lines listing the same table
+            continue
+        seen.add(key)
+        out.append({"line": lineno, "alphabet": t, "unique": uniq})
+    return out
+
+
+def decode_lines_with_alphabet(lines, alphabet: str, top: int = 5):
+    """Decode payload lines with one custom alphabet -> candidates sorted by score
+
+    The alphabet line itself is skipped by the caller; everything else is tried.
+    Returns the same per-candidate shape as the other decoders, plus `swapped_for`
+    so the evidence says which line supplied the table.
+    """
+    pool = ""
+    for line in lines:
+        t = re.sub(r'\s', '', line)
+        if t:
+            pool += t
+    if len(pool) < 8:
+        return []
+    out = []
+    for name, body in (("joined-lines", pool), ("first-line", (lines or [""])[0])):
+        body = re.sub(r'\s', '', body)
+        dec = decode_with_alphabet(body, alphabet)
+        if not dec:
+            continue
+        sc = score_text(dec)
+        flags = flag_candidates(dec)
+        out.append({
+            "steps": ["base64-swap[" + name + "]"],
+            "data": dec,
+            "text": dec.decode('utf-8', errors='replace'),
+            "score": round(sc, 2),
+            "flags": flags,
+            "confidence": confidence_of(sc, bool(flags)),
+            "note": confidence_note(dec, flags),
+            "swapped_for": "custom alphabet -> standard base64",
+        })
+    out.sort(key=lambda r: (bool(r["flags"]), r["score"]), reverse=True)
+    return out[:top]
+
+
+def swapped_alphabet_analysis(ctx: dict, max_layers: int = DEFAULT_CHAIN_LAYERS,
+                              alphabets=None):
+    """Cross-line structure: "the second line is the alphabet" -> normal decode chain
+
+    Layout the heuristic targets (a classic swapped-table challenge):
+
+        <64 shuffled characters>      <- the substitution table
+        <ciphertext in that alphabet> <- base64 body written with it
+
+    For every candidate table, the other lines are transcribed to standard base64,
+    decoded, and the ordinary decode chain plus readability scoring runs on the
+    result. Nothing is reported as a finding unless the score supports it: the
+    `candidates` list stays empty for a table that decodes to noise, while
+    `alphabets` / `levels` still record what was tried and what it scored.
+
+    Returns {"alphabets", "levels", "candidates", "notes"}. Candidates are shaped
+    like every other analyzer candidate ("attack", "data", "confidence", "detail"),
+    so verification and the report pick them up with no extra wiring.
+    """
+    if alphabets:
+        cands = []
+        for idx, alpha in enumerate(alphabets, 1):
+            cands.append({"line": 0, "alphabet": alpha, "unique": len(set(alpha)),
+                          "source": f"caller-supplied alphabet #{idx}"})
+    else:
+        cands = guess_alphabet_candidates(ctx.get("raw_text") or "")
+        for c in cands:
+            c["source"] = f"line {c['line']} looks like a 64-character table"
+    out = {"alphabets": [], "levels": [], "candidates": [], "notes": []}
+    if not cands:
+        out["notes"].append("no 64-character substitution table found "
+                            "(needs >= %d unique characters on one line)"
+                            % _MIN_ALPHABET_UNIQUE)
+        return out
+    raw_lines = (ctx.get("raw_text") or "").splitlines()
+    seen = set()
+    for cand in cands:
+        alpha = cand["alphabet"]
+        table_line = cand["line"]
+        lines = [ln for i, ln in enumerate(raw_lines, 1) if i != table_line]
+        lines = [ln[:_ALPHABET_LINE_KEEP] for ln in lines[:_ALPHABET_MAX_LINES]]
+        entry = {"line": table_line, "alphabet": alpha, "unique": cand["unique"],
+                 "source": cand["source"], "levels": []}
+        decoded = decode_lines_with_alphabet(lines, alpha)
+        for dec in decoded:
+            chain = decode_chain(dec["text"], max_layers=max_layers)
+            entry["levels"].append({
+                "view": dec["steps"][0], "preview": dec["text"][:120],
+                "score": dec["score"], "flags": dec["flags"],
+                "chain": [{k: c[k] for k in ("steps", "score", "confidence",
+                                             "flags", "hit_limit")}
+                          for c in chain[:3]]})
+            # Two views can decode to the same bytes ("joined-lines" and "first-line"
+            # on a two-line file), and a chain result can repeat its own input. One
+            # candidate per distinct plaintext, or the report says everything twice.
+            if (dec["flags"] or dec["score"] >= _ALPHABET_MIN_SCORE) \
+                    and dec["data"] not in seen:
+                seen.add(dec["data"])
+                out["candidates"].append({
+                    "attack": "swapped_base64_alphabet",
+                    "data": dec["data"],
+                    "confidence": dec["confidence"],
+                    "detail": (f"line {table_line} taken as the base64 alphabet; "
+                               f"{dec['steps'][0]} decoded, score {dec['score']}"
+                               + (f" ({dec['note']})" if dec.get("note") else "")),
+                })
+            # The chain may reach the real plaintext where the plain transcription
+            # scored low (a second layer under the swapped base64, say).
+            for c in chain[:2]:
+                if (c["flags"] or c["score"] >= _ALPHABET_MIN_SCORE) \
+                        and c["data"] not in seen:
+                    seen.add(c["data"])
+                    out["candidates"].append({
+                        "attack": "swapped_base64_alphabet",
+                        "data": c["data"],
+                        "confidence": c["confidence"],
+                        "detail": (f"line {table_line} taken as the base64 alphabet; "
+                                   f"chain {'->'.join(c['steps'])}, score {c['score']}"),
+                    })
+        if not entry["levels"]:
+            out["notes"].append(f"line {table_line}: table candidate, but no other "
+                                f"line is a valid base64 body in it")
+        out["alphabets"].append(entry)
+    return out
+
+
+def decode_chain(blob: str, max_layers: int = DEFAULT_CHAIN_LAYERS,
+                 min_score: float = 55.0, alphabets=None):
     """Try decoders layer by layer, return candidates sorted by score
 
     Each layer keeps applying decoders to the "current best result"; whether to
     go on is decided by score rather than charset matching — this stops random
     hex from being decoded as base64 all the way down into garbage.
+
+    `alphabets` (default None = off, byte-identical to the previous behaviour):
+    a list of 64-character base64 alphabets to also try, e.g. the shuffled table a
+    challenge prints in its statement. Each one is registered as an extra decoder
+    for every layer (see `decode_with_alphabet`); a wrong table simply scores badly
+    and cannot reach "high" confidence, because "high" needs a known flag prefix
+    (`confidence_of`). The alphabets are validated by `check_alphabets`.
+
+    Every returned entry carries `hit_limit`: True means the chain consumed all
+    `max_layers` layers and the result could still be decoded further, so the caller
+    should re-run with a higher `max_layers` before believing the ranking. The flag is
+    only ever set on an entry that actually decoded something (`steps` is non-empty):
+    the untouched input string is not a truncated chain. The rule, deliberately narrow
+    so that it does not cry wolf on finished chains:
+
+        last decoder output still looks like an encoding (`guess_kinds` says
+        hex/base64/base58/...) and is not plaintext-readable (score_text < 70), OR
+        the layer count equals `max_layers` and the output was strong enough to keep
+        going (it survived into the next frontier).
+
+    A chain that ends on its own, or that ends in readable text, is never flagged -
+    a complete chain is not a truncated one.
     """
+    max_layers = int(max_layers)
+    if max_layers < 1:
+        raise ValueError("max_layers must be >= 1")
+    swap_alphabets = check_alphabets(alphabets)
+    decoders = list(_DECODERS)
+    for idx, alpha in enumerate(swap_alphabets, 1):
+        decoders.append((f"base64-swap#{idx}", _make_swap_decoder(alpha)))
+
     results = []
     frontier = [(blob, [])]
     seen = set()
     for _ in range(max_layers):
         nxt = []
         for text, steps in frontier:
-            for name, fn in _DECODERS:
+            for name, fn in decoders:
                 try:
                     out = fn(text)
                 except Exception:
@@ -583,6 +857,7 @@ def decode_chain(blob: str, max_layers: int = 3, min_score: float = 55.0):
                     "flags": flags,
                     "confidence": confidence_of(sc, bool(flags)),
                     "note": confidence_note(out, flags),
+                    "hit_limit": False,
                 })
                 if sc >= min_score:
                     try:
@@ -592,6 +867,21 @@ def decode_chain(blob: str, max_layers: int = 3, min_score: float = 55.0):
         frontier = nxt
         if not frontier:
             break
+    # `frontier` is what survived the last completed layer, i.e. exactly the
+    # candidates a larger `max_layers` would have kept working on.
+    cont = {t for t, _ in frontier}
+    for r in results:
+        # `steps == []` is the input string itself, not a decode result.
+        if len(r["steps"]) != max_layers or not r["steps"]:
+            continue
+        try:
+            continues = r["data"].decode('ascii') in cont
+        except UnicodeDecodeError:
+            continues = False
+        # Decoding stopped here, but the output is still shaped like an encoding and
+        # was not readable enough to call the chain done.
+        still_encoded = bool(guess_kinds(r["text"])) and r["score"] < _PLAIN_SCORE
+        r["hit_limit"] = bool(continues or still_encoded)
     results.sort(key=lambda r: r["score"], reverse=True)
     return results
 
