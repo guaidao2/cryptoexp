@@ -49,6 +49,7 @@ from .utils.encoding import (
     caesar, rot13, affine_decrypt, morse_decode, morse_encode,
     vigenere_recover, fence_decrypt, index_of_coincidence,
     to_hex, to_base64, to_base32, to_base58,
+    from_hex, from_base64, from_base32, from_base58, from_base85,
     enhex, unhex, b64e, b64d, b32e, b32d, b58e, b58d,
 )
 from .utils.pad import (
@@ -201,7 +202,7 @@ _CANDIDATE_EXPORTS = [
     "repeating_key", "single_byte_op", "confidence_note",
     "caesar", "rot13", "affine_decrypt", "morse_decode", "morse_encode",
     "vigenere_recover", "fence_decrypt", "index_of_coincidence",
-    "to_hex", "to_base64", "to_base32", "to_base58",
+    "to_hex", "to_base64", "from_base64", "to_base32", "from_base32", "to_base58", "from_base58",
     "enhex", "unhex", "b64e", "b64d", "b32e", "b32d", "b58e", "b58d",
     # bytes / padding
     "pkcs7_pad", "pkcs7_unpad", "pkcs7_valid", "zero_pad", "zero_unpad",
