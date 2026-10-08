@@ -97,15 +97,14 @@ recovery, CRC/JWT/DER handling) as composable functions with published-vector te
 ## Install
 
 ```bash
-pip install cryptoexp          # once a stable release exists (see the alpha note)
+pip install cryptoexp          # stable releases, 0.2.0 and later
 pipx install cryptoexp         # if you only want the CLI
 ```
 
-Every release so far is a **pre-release** (`0.1.0aN`), so pip needs `--pre`:
-
-```bash
-pip install --pre cryptoexp
-```
+`0.2.0` is the first non-preview release, so a plain `pip install` picks it up. Older
+pre-releases (`0.1.0a1`, `0.1.0a2`, `0.2.0b1`) are still on PyPI but are never selected by
+default; pin one explicitly (`pip install cryptoexp==0.2.0b1`) or pass `--pre` if you
+deliberately want the newest pre-release.
 
 From a clone, nothing needs installing — the package is importable through the
 repository entry point and the source tree:

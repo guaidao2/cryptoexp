@@ -80,15 +80,13 @@ HTTP/TLS 会话。oracle 类攻击需要你提供一个回调（针对目标写�
 ## 安装
 
 ```bash
-pip install cryptoexp          # 等有稳定版之后（见下面的 alpha 说明）
+pip install cryptoexp          # 正式版，0.2.0 及以后
 pipx install cryptoexp         # 只要命令行工具的话
 ```
 
-目前所有版本都是**预发布版**（`0.1.0aN`），所以 pip 需要加 `--pre`：
-
-```bash
-pip install --pre cryptoexp
-```
+`0.2.0` 是第一个非预览版，裸装 `pip install` 就能装到。更早的预发布版
+（`0.1.0a1`、`0.1.0a2`、`0.2.0b1`）仍在 PyPI 上，但不会被默认选中；确实想装它们就显式钉版本
+（`pip install cryptoexp==0.2.0b1`）或加 `--pre`。
 
 从克隆的仓库直接跑则什么都不用装：
 
